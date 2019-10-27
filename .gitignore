@@ -1,0 +1,10 @@
+messages.dkv
+*.sh
+*.bat
+
+__pycache__
+.idea
+backups
+user_assets
+other_assets
+old
