@@ -3,6 +3,7 @@ from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 
 
+# TODO: move to client_api
 class BookmarkManager(QWidget):
     def __init__(self, parent):
         super().__init__()
@@ -38,7 +39,7 @@ class BookmarkManager(QWidget):
         self.server_list.setWindowTitle("Server List")
         self.server_list.itemSelectionChanged.connect(self.OnServerSelect)
 
-        for server in parent.user_config.bookmarks:
+        for server in parent.client.user_config.bookmarks:
             server_item = QListWidgetItem(server.name)
             self.server_list.addItem(server_item)
             pass
@@ -50,7 +51,7 @@ class BookmarkManager(QWidget):
 
     def GetSelectedServer(self):
         server_index = self.server_list.currentRow()
-        server = self.parent.user_config.bookmarks[server_index]
+        server = self.parent.client.user_config.bookmarks[server_index]
         return server
 
     @pyqtSlot()

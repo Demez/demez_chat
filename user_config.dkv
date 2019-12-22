@@ -1,17 +1,10 @@
 "bookmarks"
-{
-	"server"
-	{
-		"ip"		"173.76.53.40"
-		"port"		"1234"
-		"name"		"birb server"
-	}
-	
+{	
 	"server"
 	{
 		"ip"		"127.0.0.3"
 		"port"		"1234"
-		"name"		"demez test server"
+		"name"		"test server"
 	}
 }
 
