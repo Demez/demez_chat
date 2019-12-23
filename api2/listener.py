@@ -23,17 +23,29 @@ class SocketListener(Thread):
     
     def Print(self, string: str) -> None:
         TimePrint(f"Listener - {self.protocol}: {string}")
+
+    # TODO: make a secure pickle loader, so it can only unload what we want, a Command object
+    def Unpickle(self, obj_bytes: bytes) -> bool:
+        client_command = pickle.loads(obj_bytes)
+        self.command_queue.append(client_command)
+        self.Print("received object: " + str(client_command))
+        return True
     
     def run(self) -> None:
         while True:
             try:
-                client_bytes = self.socket.recv(4096)
+                client_bytes = self.socket.recv(8192)
+                self.Unpickle(client_bytes)
                 
-                # TODO: make a secure pickle loader, so it can only unload what we want, a Command object
-                client_command = pickle.loads(client_bytes)
-                self.command_queue.append(client_command)
-                self.Print("received object: " + str(client_command))
-
+            except pickle.UnpicklingError:
+                while True:
+                    try:
+                        client_bytes += self.socket.recv(8192)
+                        if self.Unpickle(client_bytes):
+                            break
+                    except pickle.UnpicklingError:
+                        continue
+            
             # TODO: have this thread be killed when we get here
             #  also i only get this on linux
             except EOFError:
