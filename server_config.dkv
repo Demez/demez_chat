@@ -1,9 +1,17 @@
-"channel"
+"name" "test server"
+"channels"
 {
-	"name" "test_channel"
+	"test_channel"
+	{
+	}
+
+	"bad_program"
+	{
+	}
+
 }
 
-"channel"
+"user_uuids"
 {
-	"name" "bad_program"
 }
+

@@ -1,7 +1,7 @@
 import pickle
 import socket
 import os
-# from uuid import uuid4
+from uuid import UUID
 from threading import Thread
 from time import sleep
 
@@ -23,22 +23,28 @@ from api2.listener import SocketListener
 
 
 class Client(Thread):
-    def __init__(self, name: str = "foobar") -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.name = name
         self.ping = 0
         self.ip = ""
         self.port = 0
         self.user_config = UserConfig()  # part of this should probably be disconnected from the client api
+        self.name = self.user_config.GetUsername()
         self.message_channels = {}  # channel_id: channel_info
         self.commands = {
             "init_channel_list": self.InitChannelList,
+            
             "connect": self.Connect,
             "disconnect": self.Disconnect,
+            
             "find": self.Find,  # TODO: move to cli_client?
             "ping": self.Ping,
+            
+            "add_bookmark": self.UnfinishedCommand,
+            "rm_bookmark": self.UnfinishedCommand,
             "list_bookmarks": self.UnfinishedCommand,
+            
             "list_channels": self.UnfinishedCommand,
             # "view_channel": self.UnfinishedCommand,
             "request_channel_messages": self.RequestChannelMessageRange,
@@ -63,12 +69,29 @@ class Client(Thread):
             sleep(sleep_time)
         return False
 
+    # TODO: move this to the seperate thread, along with modifying for multiple server connections
     def Connect(self, ip: str, port: int) -> bool:
         try:
             self.ip, self.port = ip, port
             self.server.connect((self.ip, self.port))
             # maybe have some setup stuff here? idk
-            # self.channels = self.RequestChannelNames()
+            # send or request a uuid
+            server_key = self.user_config.GetServerKey(ip, port)
+            if server_key:
+                self.SendBytes(server_key.bytes)
+                is_accepted = self.server.recv(4096).decode()
+                if is_accepted == "accepted":
+                    pass
+                elif is_accepted == "invalid_key":
+                    return False
+                else:
+                    return False
+            else:
+                self.SendBytes(b'request_uuid')
+                new_uuid_bytes = self.server.recv(16)
+                new_uuid = UUID(bytes=new_uuid_bytes)
+                self.user_config.SetServerKey(ip, port, new_uuid)
+            
             TimePrint("Connected to {0}:{1}".format(ip, port))
             self.listener.start()
 
@@ -83,6 +106,8 @@ class Client(Thread):
                     self.listener.command_queue.remove(self.listener.command_queue[0])
                 if end_init:
                     break
+                elif not self.listener.connected:
+                    return False
             
             self.start()
             return True
@@ -137,12 +162,9 @@ class Client(Thread):
         command = Command("request_channel_messages", channel_name, message_index, direction)
         self.SendObject(command)
     
-    # TODO: how will you store this
     def ReceiveChannelMessageRange(self, channel_page: dict) -> None:
         channel = self.message_channels[channel_page["channel_name"]]
         self.AddMessages(channel_page["channel_name"], channel_page["messages"])
-        # channel["messages"].update(channel_page["messages"])
-        # channel["messages"] = dict(sorted(channel["messages"].items()))
         
     # @staticmethod
     def AddMessages(self, channel: str, messages: dict) -> None:
@@ -191,7 +213,7 @@ class Client(Thread):
                 self._command_queue.remove(self._command_queue[0])
 
             # break if the program is shutting down
-            if self._stopping:
+            if not self.listener.connected or self._stopping:
                 break
 
             # apparently this loop was causing the cpu usage to go up to 10%

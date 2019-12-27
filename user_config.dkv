@@ -1,20 +1,10 @@
 "bookmarks"
-{	
+{
 	"server"
 	{
-		"ip"		"127.0.0.3"
-		"port"		"1234"
-		"name"		"test server"
+		"ip" "127.0.0.3"
+		"port" "1234"
+		"name" "test loopback server"
 	}
 }
-
-"user"
-{
-	//"id" "0"
-	"name"		"Demez"
-	"picture"	"demez_pfp.png"
-}
-
-
-
 

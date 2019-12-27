@@ -1,0 +1,3 @@
+[submodule "dkv"]
+	path = dkv
+	url = https://github.com/Demez/DemezKeyValues

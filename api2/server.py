@@ -1,8 +1,10 @@
+import os
 import time
 import pickle
 import socket
 import sqlite3
-import demez_key_values as dkv
+from dkv import demez_key_values as dkv
+from uuid import uuid4, UUID
 from threading import Thread
 from api2.shared import Command, TimePrint
 from api2.listener import SocketListener
@@ -86,7 +88,7 @@ class ServerClient(Thread):
                 self.RunCommand(command)
                 self.listener.command_queue.remove(self.listener.command_queue[0])
                 
-            if self._stopping:
+            if self._stopping or not self.listener.connected:
                 break
 
             # apparently this loop was causing the cpu usage to go up to 10%
@@ -114,17 +116,6 @@ CREATE TABLE events (
 );""")
         except sqlite3.OperationalError:
             pass
-
-        # temp this for history, then make sure it works when the history is empty
-        '''
-        self.AddEvent(1575046201, "Server", "fuck you")
-        self.AddEvent(1575046202, "Server", "ass")
-        self.AddEvent(1575046203, "Server", "bitch")
-        self.AddEvent(1575046204, "Server", "fdsdsf")
-        self.AddEvent(1575046205, "Server", "iuouio")
-        self.AddEvent(1575046206, "Server", "vcbbcvbvcb")
-        self.AddEvent(1575046207, "Server", "aaaaaaaaaa")
-        '''
 
     def GetMessageCount(self) -> int:
         file, cursor = self.OpenFile()
@@ -216,6 +207,7 @@ class Server:
         self.port = int(port)
         self.max_clients = max_clients
 
+        self.client_uuid_list = {}
         self.channel_list = []
         self.server_config = ServerConfig(self)
 
@@ -244,6 +236,17 @@ class Server:
     def Close(self) -> None:
         self.socket.close()
         TimePrint("Server closed")
+        
+    def MakeUUID(self) -> UUID:
+        while True:
+            new_uuid = uuid4()
+            if str(new_uuid) not in self.client_uuid_list:
+                self.client_uuid_list[str(new_uuid)] = new_uuid
+                self.server_config.AddUserUUID(new_uuid)
+                return new_uuid
+            
+    def GetUserInfo(self, uuid: UUID) -> dict:
+        pass
 
     # this just returns an empty dict, why?
     def GetChannelList(self) -> dict:
@@ -298,12 +301,23 @@ class Server:
             except Exception as F:
                 print(str(F))
 
+    def SendObject(self, client, obj) -> None:
+        self.SendBytes(pickle.dumps(obj))
+
+    def SendBytes(self, client, _bytes: bytes) -> None:
+        try:
+            client.send(_bytes)
+        except Exception as F:
+            print(str(F))
+            client.close()
+            self.RemoveClient(client)
+
     def ListenForClients(self) -> None:
         # self.socket.setblocking(False)
         self.socket.listen(self.max_clients)
         TimePrint("Server started on {0}:{1}".format(self.ip, str(self.port)))
-        try:
-            while True:
+        while True:
+            try:
                 """Accepts a connection request and stores two parameters,
                 conn which is a socket object for that user, and addr
                 which contains the IP address of the socket that just
@@ -312,14 +326,32 @@ class Server:
 
                 # prints the address of the user that just connected
                 TimePrint("-------- {0} connected --------".format(addr))
+                
+                b_client_key = conn.recv(1024)
+                if b_client_key == b"request_uuid":
+                    new_client_uuid = self.MakeUUID()
+                    self.SendBytes(conn, new_client_uuid.bytes)
+                else:
+                    client_key = UUID(bytes=b_client_key)
+                    if str(client_key) not in self.client_uuid_list:
+                        self.SendBytes(conn, b"invalid_key")
+                        conn.close()
+                        continue
+                    else:
+                        self.SendBytes(conn, b"accepted")
 
                 # creates and individual thread for every user that connects
                 client = ServerClient(self, conn, addr)
                 client.start()
                 self.client_list.append(client)
 
-        except KeyboardInterrupt:
-            self.Close()
+            except KeyboardInterrupt:
+                self.Close()
+                break
+    
+            except Exception as F:
+                print(str(F))
+                continue
 
 
 class ServerConfig:
@@ -331,7 +363,49 @@ class ServerConfig:
             with open(SERVER_CONFIG_PATH, "w", encoding="utf-8") as file:
                 pass
             self.dkv_input = dkv.DemezKeyValueRoot()
+            
+        server_name = self.dkv_input.GetItem("name")
+        if server_name:
+            server.name = server_name.value
+        else:
+            server.name = "default"
+            self.dkv_input.AddItem("name", "default")
 
-        for channel_dkv in self.dkv_input.GetAllItems("channel"):
-            channel = Channel(channel_dkv.GetItemValue("name"))
+        channel_list = self.dkv_input.GetItem("channels")
+        if channel_list:
+            for channel_dkv in channel_list.value:
+                channel = Channel(channel_dkv.key)
+                server.channel_list.append(channel)
+        else:
+            self.dkv_input.AddItem("channels", []).AddItem("default", [])
+            channel = Channel("default")
             server.channel_list.append(channel)
+
+        user_uuid_list = self.dkv_input.GetItem("user_uuids")
+        if user_uuid_list:
+            for user_uuid in user_uuid_list.value:
+                server.client_uuid_list[user_uuid.key] = UUID(user_uuid.key)
+        else:
+            self.dkv_input.AddItem("user_uuids", [])
+                
+        print("server config done")
+        
+    def AddChannel(self, channel_name: str) -> None:
+        self.dkv_input.GetItem("channels").AddItem(channel_name, [])
+        self.WriteChanges()
+        
+    def AddUserUUID(self, user_uuid: UUID) -> None:
+        self.dkv_input.GetItem("user_uuids").AddItem(str(user_uuid))
+        self.WriteChanges()
+        
+    def SetServerName(self, server_name: str) -> None:
+        self.dkv_input.GetItem("name").value = server_name
+        self.WriteChanges()
+        
+    def WriteChanges(self) -> None:
+        if os.path.isfile(SERVER_CONFIG_PATH):
+            os.rename(SERVER_CONFIG_PATH, SERVER_CONFIG_PATH + ".bak")
+        with open(SERVER_CONFIG_PATH, "w", encoding="utf-8") as file:
+            file.write(self.dkv_input.ToString())
+        if os.path.isfile(SERVER_CONFIG_PATH + ".bak"):
+            os.remove(SERVER_CONFIG_PATH + ".bak")
