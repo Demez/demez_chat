@@ -12,6 +12,7 @@ class SocketListener(Thread):
             raise Exception("Protocol is either \"client\" or \"server\"")
         self.protocol = protocol
         self.socket = connection
+        self.connected = False
         self.command_queue = []
         self._stop = False
     
@@ -31,16 +32,28 @@ class SocketListener(Thread):
         self.Print("received object: " + str(client_command))
         return True
     
+    def _CheckConnection(self, _bytes: bytes) -> bool:
+        if not _bytes:
+            self.connected = False
+            return False
+        return True
+    
     def run(self) -> None:
+        self.connected = True
         while True:
             try:
                 client_bytes = self.socket.recv(8192)
+                if not self._CheckConnection(client_bytes):
+                    break
                 self.Unpickle(client_bytes)
                 
             except pickle.UnpicklingError:
                 while True:
                     try:
-                        client_bytes += self.socket.recv(8192)
+                        client_bytes_append = self.socket.recv(8192)
+                        if not self._CheckConnection(client_bytes_append):
+                            break
+                        client_bytes += client_bytes_append
                         if self.Unpickle(client_bytes):
                             break
                     except pickle.UnpicklingError:
