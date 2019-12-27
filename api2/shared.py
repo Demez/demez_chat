@@ -1,5 +1,6 @@
 from datetime import datetime
 from time import time
+import platform
 
 
 class Command:
@@ -36,6 +37,13 @@ def UnixTo24Hour(unix_time: float) -> str:
     return UnixToDateTime(unix_time).strftime("%H:%M:%S")
 
 
+def IsWindows10() -> bool:
+    if platform.platform().startswith("Windows-10"):
+        return True
+    return False
+
+
 def TimePrint(*args) -> None:
+    # TODO: maybe have a check here if we installed colorama, and use colored text here
     print("[{0}] {1}".format(GetTime24Hour(), str(*args)))
 
