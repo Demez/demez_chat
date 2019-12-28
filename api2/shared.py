@@ -21,6 +21,14 @@ def GetTime12Hour() -> str:
     return GetTime().strftime("%I:%M:%S")
 
 
+def GetDate() -> str:
+    return GetTime().strftime("%Y-%m-%d")
+
+
+def GetDateAndTime() -> str:
+    return GetTime().strftime("%Y-%m-%d - %H:%M:%S")
+
+
 def GetTimeUnix() -> float:
     return time()
 
@@ -45,5 +53,5 @@ def IsWindows10() -> bool:
 
 def TimePrint(*args) -> None:
     # TODO: maybe have a check here if we installed colorama, and use colored text here
-    print("[{0}] {1}".format(GetTime24Hour(), str(*args)))
+    print("[{0}] {1}".format(GetDateAndTime(), str(*args)))
 
