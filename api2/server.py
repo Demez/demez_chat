@@ -153,6 +153,7 @@ CREATE TABLE events (
         # delete
         # cursor.execute("""DROP TABLE employee;""")
 
+    # TODO: fix being able to put quotes in here, it doesn't work
     def AddMessage(self, message: dict) -> None:
         self.RunCommand(f"""INSERT INTO events {self.GetEventTableInputs()}
         VALUES ({float(message["time"])}, "{message["name"]}", "{message["text"]}", "{message["file"]}");""")
@@ -211,7 +212,7 @@ class Server:
         self.channel_list = []
         self.server_config = ServerConfig(self)
 
-        # The first argument AF_INET is the address domain of the socket.
+        # The first argument AF_INET is the combined_address domain of the socket.
         # This is used when we have an Internet Domain with any two hosts.
         # The second argument is the type of socket.
         # SOCK_STREAM means that data or characters are read in a continuous flow.
@@ -320,11 +321,11 @@ class Server:
             try:
                 """Accepts a connection request and stores two parameters,
                 conn which is a socket object for that user, and addr
-                which contains the IP address of the socket that just
+                which contains the IP combined_address of the socket that just
                 connected"""
                 conn, addr = self.socket.accept()
 
-                # prints the address of the user that just connected
+                # prints the combined_address of the user that just connected
                 TimePrint("-------- {0} connected --------".format(addr))
                 
                 b_client_key = conn.recv(1024)
@@ -334,11 +335,11 @@ class Server:
                 else:
                     client_key = UUID(bytes=b_client_key)
                     if str(client_key) not in self.client_uuid_list:
-                        self.SendBytes(conn, b"invalid_key")
+                        self.SendBytes(conn, b"0")
                         conn.close()
                         continue
                     else:
-                        self.SendBytes(conn, b"accepted")
+                        self.SendBytes(conn, b"1")
 
                 # creates and individual thread for every user that connects
                 client = ServerClient(self, conn, addr)

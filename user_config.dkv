@@ -6,5 +6,12 @@
 		"port" "1234"
 		"name" "test loopback server"
 	}
+
+}
+
+"user"
+{
+	"name" "Default Name"
+	"picture" "doge.png"  // unused atm, will use eventually
 }
 
