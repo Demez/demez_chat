@@ -139,8 +139,8 @@ class ServerCache:
         address_port = self.ip + ":" + str(self.port)
         self.server_listener.SetConnected(True)
         listener = self.client.listener
+        end_init = False
         while True:
-            end_init = False
             while len(listener.command_queue[address_port]) > 0:
                 command = listener.command_queue[address_port][0]
                 if command.command == "init_finish":
