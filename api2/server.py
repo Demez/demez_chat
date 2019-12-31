@@ -1,6 +1,6 @@
 import os
 import time
-import pickle
+import json
 import socket
 import sqlite3
 from dkv import demez_key_values as dkv
@@ -34,8 +34,12 @@ class ServerClient(Thread):
 
         self.ClientInit()
 
-    def SendCommand(self, command: Command) -> None:
-        self.SendBytes(pickle.dumps(command))
+    def SendCommand(self, command: str, *args) -> None:
+        cmd_dict = {
+            "command": command,
+            "args": [*args],
+        }
+        self.SendBytes(json.dumps(cmd_dict).encode())
 
     def SendBytes(self, _bytes: bytes) -> None:
         try:
@@ -50,35 +54,33 @@ class ServerClient(Thread):
             self._stopping = True
 
     def ClientInit(self) -> None:
-        self.SendCommand(Command("init_channel_list", self.server.GetChannelList()))
-        # self.SendObject(Command("init_member_list", self.server.GetMemberList()))
-        self.SendCommand(Command("init_finish"))
+        self.SendCommand("init_channel_list", self.server.GetChannelList())
+        # self.SendObject("init_member_list", self.server.GetMemberList())
+        self.SendCommand("init_finish")
 
     def ReceiveMessage(self, message: dict) -> None:
         channel = self.server.GetChannel(message["channel"])
         channel.AddMessage(message)
-        client_command = Command("receive_message", message)
-        self.server.Broadcast(client_command)
+        self.server.Broadcast("receive_message", message)
         
     def SendChannelMessageRange(self, channel_name: str, start_message: int, direction: str = "back", message_count: int = 50) -> None:
         # ask for a section of the channel event history
         channel = self.server.GetChannel(channel_name)
         channel_page = channel.GetMessages(start_message, message_count, direction)
         # channel_page = channel.GetAllMessagesTest()
-        command = Command("receive_channel_messages", {
+        self.SendCommand("receive_channel_messages", {
             "channel_name": channel_name,
             "start_message": start_message,
             "message_count": message_count,
             "messages": channel_page,
         })
-        self.SendCommand(command)
 
     def RunCommand(self, cmd: Command) -> None:
         if cmd.command in self.commands.keys():
             self.commands[cmd.command](*cmd.args)
     
     def Ping(self) -> None:
-        self.SendCommand(Command("ping"))
+        self.SendCommand("ping")
 
     def run(self) -> None:
         TimePrint("socket running")
@@ -273,9 +275,9 @@ class Server:
                 TimePrint("-------- {0} disconnected --------".format(address))
 
     # this will be used for when we receive a message or some shit idk
-    def Broadcast(self, command: Command) -> None:
+    def Broadcast(self, command: str, *args) -> None:
         for client in self.client_list:
-            client.SendCommand(command)
+            client.SendCommand(command, *args)
 
     def Find(self, search: str) -> None:
         result = []
@@ -302,8 +304,8 @@ class Server:
             except Exception as F:
                 print(str(F))
 
-    def SendObject(self, client, obj) -> None:
-        self.SendBytes(pickle.dumps(obj))
+    # def SendObject(self, client, obj) -> None:
+    #     self.SendBytes(pickle.dumps(client, obj))
 
     def SendBytes(self, client, _bytes: bytes) -> None:
         try:

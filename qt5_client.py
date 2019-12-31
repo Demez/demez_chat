@@ -173,6 +173,15 @@ class ChatView(QScrollArea):
         self.messages.clear()
         RemoveWidgets(self.GetLayout())
         main_window.chat_box.Disable()
+        
+    # json stores keys for dictionaries as a string only, and min in python for strings
+    @staticmethod
+    def GetMinMessageIndex(messages: dict) -> int:
+        return min(map(int, messages.keys()))
+        
+    @staticmethod
+    def GetMaxMessageIndex(messages: dict) -> int:
+        return max(map(int, messages.keys()))
 
     # TODO: use QListModel or something and prepend and append messages to it
     #  get the min and max indexes from the dictionary and use a while loop to get the messages sorted
@@ -184,18 +193,20 @@ class ChatView(QScrollArea):
             return
         start_time = perf_counter()
         dict_index = 0
-        index = min(channel["messages"])
+        channel["messages"] = {int(k): v for k, v in channel["messages"].items()}
+        index = int(min(channel["messages"]))
+        # index = self.GetMinMessageIndex(channel["messages"])
+        # while index <= self.GetMaxMessageIndex(channel["messages"]):
         while index <= max(channel["messages"]):
             message = channel["messages"][index]
             # msg_start_time = perf_counter()
-            # self.AddMessage(index, message)
-            self.sig_add_message.emit(index, message)
+            self.AddMessage(index, message)
             # print("made message view in " + str(perf_counter() - msg_start_time) + " seconds")
             index += 1
             dict_index += 1
         TimePrint("adding messages time: " + str(perf_counter() - start_time))
     
-    def AddMessage(self, index: int, message: tuple) -> None:
+    def AddMessage(self, index: int, message: list) -> None:
         # what this does is go through all the messages in a list of the message indexes
         # this is so we can insert a message in the correct spot
         # probably slow and very messy, but idc right now, it works, i can change it later
@@ -393,6 +404,10 @@ class MainWindow(QWidget):
         self.setLayout(QVBoxLayout())
         self.setWindowTitle("Demez Chat")
         self.client = Client()
+        
+        self.sig_connection_callback.connect(self.RunServerConnectionChangeCallback)
+        self.client.SetServerConnectionChangeCallback(self.EmitServerConnectionChangeCallback)
+        
         self.client.start()
         self.bookmarks_manager = BookmarkManager(self)
         self.menu_bar = MenuBar(self)
@@ -435,14 +450,11 @@ class MainWindow(QWidget):
 
         # self.sig_view_channel.connect(self.chat_view.MessageUpdate)
         self.sig_callback.connect(self.HandleSignal)
-        self.sig_connection_callback.connect(self.RunServerConnectionChangeCallback)
 
         self.callbacks = {}
 
         self.AddCallback("receive_channel_messages", self.chat_view.MessageUpdate)
         self.AddCallback("receive_message", self.ReceiveMessage)
-        
-        self.client.SetServerConnectionChangeCallback(self.EmitServerConnectionChangeCallback)
 
         self.show()
 

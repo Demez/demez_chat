@@ -1,4 +1,4 @@
-import pickle
+import json
 import socket
 import os
 from uuid import UUID
@@ -56,8 +56,12 @@ class ServerCache:
             # "remove_message": self.RemoveMessage,
         }
 
-    def SendObject(self, obj) -> None:
-        self.SendBytes(pickle.dumps(obj))
+    def SendCommand(self, command: str, *args) -> None:
+        cmd_dict = {
+            "command": command,
+            "args": [*args],
+        }
+        self.SendBytes(json.dumps(cmd_dict).encode())
 
     def SendBytes(self, _bytes: bytes) -> None:
         try:
@@ -179,15 +183,19 @@ class ServerCache:
     def RequestChannelMessageRange(self, channel_name: str, message_index: int, direction: str = "back") -> None:
         if direction not in {"back", "forward"}:
             raise Exception("direction can only be 'back' or 'forward' for message history")
-        command = Command("request_channel_messages", channel_name, message_index, direction)
-        self.SendObject(command)
+        self.SendCommand("request_channel_messages", channel_name, message_index, direction)
 
     def ReceiveChannelMessageRange(self, channel_page: dict) -> None:
         channel = self.message_channels[channel_page["channel_name"]]
         self.AddMessages(channel_page["channel_name"], channel_page["messages"])
 
-    # @staticmethod
+    @staticmethod
+    def FixMessageIndexTypes(message_dict: dict) -> dict:
+        return {int(k): v for k, v in message_dict.items()}
+        
     def AddMessages(self, channel: str, messages: dict) -> None:
+        # uh = map(int, messages.keys())
+        messages = self.FixMessageIndexTypes(messages)
         self.message_channels[channel]["messages"].update(messages)
         self.message_channels[channel]["messages"] = dict(sorted(self.message_channels[channel]["messages"].items()))
 
@@ -204,8 +212,7 @@ class ServerCache:
             "text": message,
             "file": file,
         }
-        command = Command("send_message", command_value)
-        self.SendObject(command)
+        self.SendCommand("send_message", command_value)
 
 
 class Client(Thread):

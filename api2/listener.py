@@ -1,4 +1,4 @@
-import pickle
+import json
 import socket
 from threading import Thread
 from api2.shared import Command, TimePrint
@@ -16,18 +16,15 @@ class SocketListener(Thread):
         self.command_queue = []
         self._stop = False
     
-    def RecvObject(self, _bytes: int = 4096) -> Command:
-        return pickle.loads(self.socket.recv(_bytes))
-    
     def Stop(self) -> None:
         self._stop = True
     
     def Print(self, string: str) -> None:
         TimePrint(f"Listener - {self.protocol}: {string}")
-
-    # TODO: make a secure pickle loader, so it can only unload what we want, a Command object
-    def Unpickle(self, obj_bytes: bytes) -> bool:
-        client_command = pickle.loads(obj_bytes)
+    
+    def JsonLoads(self, obj_bytes: bytes) -> bool:
+        client_command_json = json.loads(obj_bytes.decode())
+        client_command = Command(client_command_json["command"], *client_command_json["args"])
         self.command_queue.append(client_command)
         self.Print("received object: " + str(client_command))
         return True
@@ -45,23 +42,14 @@ class SocketListener(Thread):
                 client_bytes = self.socket.recv(8192)
                 if not self._CheckConnection(client_bytes):
                     break
-                self.Unpickle(client_bytes)
-                
-            except pickle.UnpicklingError:
-                while True:
-                    try:
-                        client_bytes_append = self.socket.recv(8192)
-                        if not self._CheckConnection(client_bytes_append):
-                            break
-                        client_bytes += client_bytes_append
-                        if self.Unpickle(client_bytes):
-                            break
-                    except pickle.UnpicklingError:
-                        continue
+                self.JsonLoads(client_bytes)
             
             # TODO: have this thread be killed when we get here
             #  also i only get this on linux
             except EOFError:
+                break
+                
+            except ConnectionAbortedError:
                 break
 
             except Exception as F:

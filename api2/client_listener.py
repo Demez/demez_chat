@@ -1,4 +1,4 @@
-import pickle
+import json
 import socket
 from threading import Thread
 from api2.shared import Command, TimePrint
@@ -25,27 +25,54 @@ class SocketListener:
     def Print(self, string: str) -> None:
         TimePrint(f"Listener - {self.combined_address}: {string}")
 
-    # TODO: make a secure pickle loader, so it can only unload what we want, a Command object
-    def UnpickleBuffer(self) -> bool:
+    def GetEndCharIndex(self) -> int:
+        char_index = 0
+        depth = 0
+        buffer = self._recv_buf.decode()
+        in_quote = False
+        
+        def PrevChar() -> str:
+            if 0 < char_index < len(buffer):
+                return buffer[char_index - 1]
+            return ""
+        
+        while char_index < len(buffer):
+            char = buffer[char_index]
+            if char == '"' and PrevChar() != "\\":
+                in_quote = not in_quote
+                
+            if not in_quote:
+                if char in {"{", "["}:
+                    depth += 1
+                elif char in {"}", "]"}:
+                    depth -= 1
+        
+            char_index += 1
+            if depth == 0:
+                break
+        return char_index
+
+    def JsonBuffer(self) -> bool:
         if not self._recv_buf:
             return True
-        char = 3
-        while True:
-            try:
-                client_bytes = self._recv_buf[:char]
-                client_command = pickle.loads(client_bytes)
-                self.client.command_queue[self.combined_address].append(client_command)
-                self.ClearBuffer(char)
-                self.Print("received object: " + str(client_command))
-                return True
+        char_index = self.GetEndCharIndex()
+        try:
+            client_command_dict = json.loads(self._recv_buf[:char_index].decode())
+            client_command = Command(client_command_dict["command"], *client_command_dict["args"])
+            self.client.command_queue[self.combined_address].append(client_command)
+            self.ClearBuffer(char_index)
+            self.Print("received object: " + str(client_command))
+            return True
             
-            except pickle.UnpicklingError:
-                char += 1
-                continue
-                
-            except EOFError:
-                char += 1
-                continue
+        except json.JSONDecodeError as F:
+            raise F
+            
+        except EOFError:
+            return False
+            
+        except Exception as F:
+            print(str(F))
+            return False
     
     def _CheckConnection(self, _bytes: bytes) -> bool:
         if not _bytes:
@@ -72,7 +99,7 @@ class SocketListener:
             try:
                 if not self.ReceiveData():
                     break
-                if self.UnpickleBuffer():
+                if self.JsonBuffer():
                     break
                         
             # except BlockingIOError:
