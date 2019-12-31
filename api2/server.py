@@ -110,8 +110,8 @@ class Channel:
         # do we have a message table here?
         try:
             crsr.execute("""
-CREATE TABLE events (
-    time DATE,
+CREATE TABLE messages (
+    time FLOAT,
     user STRING,
     text STRING,
     file STRING
@@ -121,7 +121,7 @@ CREATE TABLE events (
 
     def GetMessageCount(self) -> int:
         file, cursor = self.OpenFile()
-        cursor.execute("select count (*) from events;")
+        cursor.execute("select count (*) from messages;")
         message_count = cursor.fetchone()[0]
         file.close()
         return message_count
@@ -157,12 +157,15 @@ CREATE TABLE events (
 
     # TODO: fix being able to put quotes in here, it doesn't work
     def AddMessage(self, message: dict) -> None:
-        self.RunCommand(f"""INSERT INTO events {self.GetEventTableInputs()}
-        VALUES ({float(message["time"])}, "{message["name"]}", "{message["text"]}", "{message["file"]}");""")
+        file, cursor = self.OpenFile()
+        cursor.execute(
+            """INSERT INTO messages (time, user, text, file) VALUES (?, ?, ?, ?);""",
+            (float(message["time"]), message["name"], message["text"], message["file"]))
+        self.SaveAndClose(file)
     
     def GetAllMessagesTest(self) -> list:
         file, cursor = self.OpenFile()
-        cursor.execute("SELECT * FROM events ORDER BY time ASC")
+        cursor.execute("SELECT * FROM messages ORDER BY time ASC")
         messages = cursor.fetchall()
         file.close()
         return messages
@@ -176,7 +179,7 @@ CREATE TABLE events (
         elif direction == "ASC":
             start_message_index += 1
         cursor.execute(
-            f"SELECT * FROM events ORDER BY time {direction} limit {str(message_count)} offset {str(total_message_count - start_message_index)}")
+            f"SELECT * FROM messages ORDER BY time {direction} limit {str(message_count)} offset {str(total_message_count - start_message_index)}")
         messages = cursor.fetchall()
         file.close()
         message_dict = {}
