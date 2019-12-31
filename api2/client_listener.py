@@ -105,7 +105,7 @@ class ClientListener(Thread):
         socket_listener = SocketListener(self, connection, address, name)
         self.command_queue[socket_listener.combined_address] = []
         self.server_list.append(socket_listener)
-        # self.server_init_list.append(socket_listener)
+        self.server_init_list.append(socket_listener.combined_address)
         return socket_listener
 
     def ReplaceSocket(self, connection: socket, address: str, name: str) -> None:

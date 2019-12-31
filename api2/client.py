@@ -149,6 +149,7 @@ class ServerCache:
                     self.RunCommand(command)
                 listener.command_queue[address_port].remove(listener.command_queue[address_port][0])
             if end_init:
+                listener.server_init_list.remove(address_port)
                 break
             elif not self.server_listener.connected:
                 return False
@@ -275,6 +276,8 @@ class Client(Thread):
         connect_thread.start()
         while True:
             for address in self.listener.command_queue:
+                if address in self.listener.server_init_list:
+                    continue
                 while len(self.listener.command_queue[address]) > 0:
                     command = self.listener.command_queue[address][0]
                     self.RunServerCacheCommand(address, command)
