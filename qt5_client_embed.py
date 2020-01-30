@@ -1,6 +1,7 @@
 import os
 import urllib.request
 import urllib.error
+from http.client import HTTPResponse
 from ssl import CertificateError
 from enum import Enum, auto
 from PyQt5.QtWidgets import *
@@ -51,7 +52,7 @@ def CheckImage(_bytes: bytes) -> bool:
 
 # TODO: make url downloading and stuff separate from the main thread (new thread)
 #  and then have a callback on the main thread when if downloads successfully
-def DownloadURL(url: str):
+def DownloadURL(url: str, bad_callback: classmethod):
     user_agent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'
     headers = {'User-Agent': user_agent, }
 
@@ -63,14 +64,14 @@ def DownloadURL(url: str):
     except CertificateError:
         return None
     # data = response.read()  # The data u need
-    return response
+    # return response
+    bad_callback(url, response)
 
 
 class ImageEmbed(QLabel):
-    def __init__(self, parent: QWidget, path: str):
+    def __init__(self, parent: QWidget, path: str, response: HTTPResponse):
         super().__init__(parent)
         self.path = path
-        response = DownloadURL(path)  # why am i doing this twice?z
         data = response.read()
         self.image_pixmap = QPixmap()
         self.image_pixmap.loadFromData(data)
