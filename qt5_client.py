@@ -1,6 +1,10 @@
 import sys
 
+from http.client import HTTPResponse
+from threading import Thread
+from urllib.parse import urlparse
 from qt5_bookmark_manager import BookmarkManager
+from qt5_client_embed import *
 from api2.client import Client, ServerCache
 from api2.shared import Command, TimePrint, GetTime24Hour, UnixToDateTime, UnixTo24Hour
 
@@ -8,6 +12,11 @@ from api2.shared import Command, TimePrint, GetTime24Hour, UnixToDateTime, UnixT
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
+
+# also need to install PyQtWebEngine
+# for linux, do apt-get install python3-pyqt5.qtwebengine
+from PyQt5.QtWebEngineWidgets import *
+from PyQt5.QtWebEngineCore import *
 
 from time import perf_counter, sleep
 
@@ -26,6 +35,14 @@ def RemoveWidgets(layout: QLayout) -> None:
         return
     except Exception as F:
         print(F)
+
+
+def IsValidURL(url: str) -> bool:
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
 
 
 class ChatBox(QWidget):
@@ -62,6 +79,8 @@ class ChatBox(QWidget):
 
 
 class MessageView(QWidget):
+    sig_embed = pyqtSignal(str, HTTPResponse)
+
     def __init__(self, unix_time, sender: str, text: str, file: str = ""):
         super().__init__()
         self.setLayout(QHBoxLayout())
@@ -118,7 +137,36 @@ class MessageView(QWidget):
         self.layout().setSpacing(6)
         self.setContentsMargins(QMargins(0, 0, 0, 0))
 
+        self.sig_embed.connect(self.EmbedDownloadCallback)
+
+        self.embed_list = []
+        self.url_list = self.CheckForURL()
+        # TODO: limit the max download thread count
+        for url in self.url_list:
+            bad_download_thread = Thread(target=DownloadURL, args=(url, self.EmitEmbedDownloadCallback))
+            bad_download_thread.start()
+
         # self.setStyleSheet("border: 2px solid; border-color: #660000;")
+
+    def CheckForURL(self) -> list:
+        url_list = []
+        text_split = self.text.text().split(" ")
+        for string in text_split:
+            if IsValidURL(string):
+                url_list.append(string)
+        return url_list
+
+    def EmitEmbedDownloadCallback(self, url: str, opened_url: HTTPResponse) -> None:
+        self.sig_embed.emit(url, opened_url)
+
+    def EmbedDownloadCallback(self, url: str, opened_url: HTTPResponse) -> None:
+        # will use when finished
+        # embed_type = GetEmbedTypeBytes(opened_url)
+        embed_type = GetEmbedTypeExt(url)
+        if embed_type == EmbedTypes.IMAGE:
+            image_embed = ImageEmbed(main_window.chat_view, url, opened_url)
+            self.embed_list.append(image_embed)
+            self.message_layout.addWidget(image_embed)
         
         
 # TODO: when the scrollbar reaches the top, request more messages
