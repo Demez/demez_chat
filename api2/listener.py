@@ -1,32 +1,46 @@
 import json
+import base64
 import socket
+from time import time
 from threading import Thread
-from api2.shared import Command, TimePrint
+from api2.shared import TimePrint, Decode
 
 
 class SocketListener(Thread):
-    def __init__(self, protocol: str, connection: socket) -> None:
+    def __init__(self, server, connection: socket) -> None:
         super().__init__()
-        # TODO: maybe improve this?
-        if protocol.casefold() not in ("client", "server"):
-            raise Exception("Protocol is either \"client\" or \"server\"")
-        self.protocol = protocol
+        self.server = server
         self.socket = connection
         self.connected = False
-        self.command_queue = []
+        self.uuid_verified = False
+        self.event_queue = []
         self._stop = False
     
     def Stop(self) -> None:
         self._stop = True
     
     def Print(self, string: str) -> None:
-        TimePrint(f"Listener - {self.protocol}: {string}")
+        # put ip address here
+        # TimePrint(f"Listener - {self.protocol}: {string}")
+        TimePrint(f"Listener: {string}")
+
+    def DecodeData(self, encoded_string: str):
+        # TODO: finish this, need to decode, get json end char,
+        #  and add anything after back to the start of the buffer
+        #  needs some more changes from the client_listener
+        #  commenting out right now just because this commit is already massive enough
+        '''
+        if self.uuid_verified:
+            return Decode(self.server.private_uuid, encoded_string)
+        else:
+        '''
+        return base64.b64decode(encoded_string).decode()
     
     def JsonLoads(self, obj_bytes: bytes) -> bool:
-        client_command_json = json.loads(obj_bytes.decode())
-        client_command = Command(client_command_json["command"], *client_command_json["args"])
-        self.command_queue.append(client_command)
-        self.Print("received object: " + str(client_command))
+        client_command_json = json.loads(obj_bytes)
+        client_command_json["time_received"] = time()
+        self.event_queue.append(client_command_json)
+        self.Print("received event: " + str(client_command_json["event"]))
         return True
     
     def _CheckConnection(self, _bytes: bytes) -> bool:
@@ -42,7 +56,8 @@ class SocketListener(Thread):
                 client_bytes = self.socket.recv(8192)
                 if not self._CheckConnection(client_bytes):
                     break
-                self.JsonLoads(client_bytes)
+                decoded_data = self.DecodeData(client_bytes)
+                self.JsonLoads(decoded_data)
             
             # TODO: have this thread be killed when we get here
             #  also i only get this on linux

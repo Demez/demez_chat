@@ -1,12 +1,11 @@
 import sys
 
-from http.client import HTTPResponse
 from threading import Thread
 from urllib.parse import urlparse
 from qt5_bookmark_manager import BookmarkManager
 from qt5_client_embed import *
 from api2.client import Client, ServerCache
-from api2.shared import Command, TimePrint, GetTime24Hour, UnixToDateTime, UnixTo24Hour
+from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime
 
 # for pycharm, install pyqt5-stubs, so you don't get 10000 errors for no reason
 from PyQt5.QtWidgets import *
@@ -15,8 +14,8 @@ from PyQt5.QtCore import *
 
 # also need to install PyQtWebEngine
 # for linux, do apt-get install python3-pyqt5.qtwebengine
-from PyQt5.QtWebEngineWidgets import *
-from PyQt5.QtWebEngineCore import *
+# from PyQt5.QtWebEngineWidgets import *
+# from PyQt5.QtWebEngineCore import *
 
 from time import perf_counter, sleep
 
@@ -94,9 +93,19 @@ class MessageView(QWidget):
         # image_label.setPixmap(QPixmap(DEFAULT_PFP_PATH))
 
         self.user_image = QLabel()
-        self.name = QLabel(sender)
+        self.user_id = sender
+        
+        server = main_window.server_list.GetSelectedServerCache()
+        self.user = server.member_list[sender]
+        
+        self.name = QLabel(self.user[0])
+        # TODO: format time based on computer settings
         self.time = QLabel(UnixToDateTime(unix_time).strftime("%Y-%m-%d - %H:%M:%S"))
         self.text = QLabel(text)
+        
+        self.name.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.time.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         # self.text.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         # self.text.setWordWrap(True)  # why does this not work correctly
 
@@ -122,7 +131,7 @@ class MessageView(QWidget):
         self.header_layout.addWidget(self.name)
         self.header_layout.addWidget(self.time)
         self.header_layout.addStretch(1)
-        
+
         self.message_layout.addWidget(self.text)
         # self.message_layout.setSpacing(4)
         # self.message_layout.setContentsMargins(QMargins(0, 0, 0, 0))
@@ -143,7 +152,7 @@ class MessageView(QWidget):
         self.url_list = self.CheckForURL()
         # TODO: limit the max download thread count
         for url in self.url_list:
-            bad_download_thread = Thread(target=DownloadURL, args=(url, self.EmitEmbedDownloadCallback))
+            bad_download_thread = Thread(target=DownloadURL, args=(url, self.sig_embed.emit))
             bad_download_thread.start()
 
         # self.setStyleSheet("border: 2px solid; border-color: #660000;")
@@ -156,9 +165,7 @@ class MessageView(QWidget):
                 url_list.append(string)
         return url_list
 
-    def EmitEmbedDownloadCallback(self, url: str, opened_url: HTTPResponse) -> None:
-        self.sig_embed.emit(url, opened_url)
-
+    # TODO: look at QMovie for embeds here, or use libmpv, good luck with that in python though lol
     def EmbedDownloadCallback(self, url: str, opened_url: HTTPResponse) -> None:
         # will use when finished
         # embed_type = GetEmbedTypeBytes(opened_url)
@@ -360,6 +367,9 @@ class ServerButton(QListWidgetItem):
     def GetServerName(self) -> str:
         return self._server_name
         
+    def GetServerCache(self) -> ServerCache:
+        return main_window.client.GetServerCache(self._address)
+        
     def SetServerName(self, server_name: str) -> None:
         self._server_name = server_name
         self.setText(server_name)
@@ -501,17 +511,14 @@ class MainWindow(QWidget):
 
         self.callbacks = {}
 
-        self.AddCallback("receive_channel_messages", self.chat_view.MessageUpdate)
+        self.AddCallback("channel_messages", self.chat_view.MessageUpdate)
         self.AddCallback("receive_message", self.ReceiveMessage)
 
         self.show()
 
     def AddCallback(self, command: str, function: classmethod) -> None:
         self.callbacks[command] = function
-        self.client.AddCallback(command, self.RunCallback)
-        
-    def RunCallback(self, command: str, *fuck) -> None:
-        self.sig_callback.emit(command, *fuck)
+        self.client.AddCallback(command, self.sig_callback.emit)
 
     def HandleSignal(self, command: str, *args) -> None:
         if command in self.callbacks:
@@ -524,18 +531,18 @@ class MainWindow(QWidget):
         if connected:
             self.server_list.GetServerButton(address).Enable()
         else:
-            current_server = self.server_list.GetSelectedServerAddress()
             server_button = self.server_list.GetServerButton(address)
             server_button.setSelected(False)
             server_button.Disable()
-            if current_server == address:
+            if server_button.isSelected():
                 self.channel_list.clear()
                 self.chat_view.Clear()
 
     def ReceiveMessage(self, message) -> None:
         server_cache = self.server_list.GetSelectedServerCache()
-        channel = server_cache.message_channels[message["channel"]]
-        message_tuple = (message["time"], message["name"], message["text"], message["file"])
+        content = message["content"]
+        channel = server_cache.message_channels[content["channel"]]
+        message_tuple = [content["time"], content["name"], content["text"], content["file"]]
         self.chat_view.AddMessage(channel["message_count"], message_tuple)
         channel["message_count"] += 1
         print("uhhh")

@@ -1,15 +1,25 @@
 import os
-import time
 import json
+import base64
 import socket
 import sqlite3
+import datetime
+from time import time, sleep
 from dkv import demez_key_values as dkv
 from uuid import uuid4, UUID
 from threading import Thread
-from api2.shared import Command, TimePrint
+from api2.shared import Encode, TimePrint
 from api2.listener import SocketListener
 from api2.dir_tools import CreateDirectory
-import math
+
+# ----- These are needed for comparing client and server version -----
+# update this whenever the json dict format or encoding/decoding is changed,
+#  like something that won't be compatible across versions in SendPacket and/or Listener is changed
+PROTOCOL_VERSION = 1
+
+# how messages are sent/displayed,
+MESSAGE_VERSION = 1
+USER_INFO_VERSION = 1
 
 SERVER_CONFIG_PATH = "server_config.dkv"
 CreateDirectory("channels")
@@ -23,79 +33,184 @@ class ServerClient(Thread):
         self.client = client
         self.address = address
         self.server = server
-        self.listener = SocketListener("server", client)
+
+        self.private_uuid = None
+        self.public_uuid = None
+        self.username = None
+        self.user_tag = None
+        self._uuid_verified = False
+
+        self.listener = SocketListener(self, client)
         self.listener.start()
         self._stopping = False
-        self.commands = {
+        self.event_function_dict = {
+            "init_uuid": self.InitCheckUUID,
+            "request_uuid": self.InitRequestUUID,
+            "init_version": self.InitVersionCheck,
+            "user_info": self.ReceiveUserInfo,
+            "full_update": self.FullUpdate,
+
             "receive_message": self.ReceiveMessage,
             "send_message": self.ReceiveMessage,
-            "request_channel_messages": self.SendChannelMessageRange,
+            "channel_messages": self.SendChannelMessageRange,
         }
+        
+        # self.FullUpdate()
 
-        self.ClientInit()
-
-    def SendCommand(self, command: str, *args) -> None:
+    def SendPacket(self, event: str, kwargs: dict = None) -> None:
+        if self._stopping:
+            return
+        if not kwargs:
+            kwargs = {}
         cmd_dict = {
-            "command": command,
-            "args": [*args],
+            "event": event,
+            "content": kwargs,
+            # "time_sent": datetime.datetime.now().timestamp(),
+            "time_sent": time(),
+            "time_received": None,
         }
-        self.SendBytes(json.dumps(cmd_dict).encode())
+        try:
+            string = self.EncodeData(json.dumps(cmd_dict))
+        except Exception as F:
+            print(str(F))
+            return
+        self.SendBytes(string)
 
     def SendBytes(self, _bytes: bytes) -> None:
         try:
             self.client.send(_bytes)
         except Exception as F:
             print(str(F))
-            self.client.close()
-            self.listener.Stop()
+            self.Close()
 
-            # if the link is broken, we remove the socket
-            self.server.RemoveClient(self.client)
-            self._stopping = True
+    def EncodeData(self, json_string: str):
+        # look at listener decode function
+        '''
+        if self._uuid_verified:
+            # cipher = AES.new(bytes(self.private_uuid), AES.MODE_ECB)
+            # encoded = base64.b64encode(cipher.encrypt(json_string.encode("utf-8")))
+            encoded = Encode(self.private_uuid, json_string)
+        else:
+        '''
+        # just use base64 until we verify/send the UUID
+        encoded = base64.b64encode(json_string.encode("utf-8"))
+        return encoded
+    
+    def WaitForResponse(self) -> dict:
+        try:
+            while True:
+                if self.listener.event_queue:
+                    event = self.listener.event_queue[0]
+                    self.listener.event_queue.remove(event)
+                    return event
+                elif not self.listener.connected:
+                    return {}
+                sleep(0.1)
+        except Exception as F:
+            print(str(F))
+            return {}
 
-    def ClientInit(self) -> None:
-        self.SendCommand("init_channel_list", self.server.GetChannelList())
-        # self.SendObject("init_member_list", self.server.GetMemberList())
-        self.SendCommand("init_finish")
+    def InitCheckUUID(self, uuid: dict) -> None:
+        self.private_uuid = uuid["content"]["private"]
+        self.public_uuid = uuid["content"]["public"]
+
+        if self.private_uuid not in self.server.user_info_file.GetAllPrivateUUIDS():  # and \
+            #     str(self.public_uuid) not in self.server.user_info_file.GetAllPublicUUIDS():
+            self.SendPacket("wrong_uuid")
+            self.WaitForResponse()
+            self.Close()
+        else:
+            self.SendPacket("valid_uuid")
+            self._uuid_verified = True
+            self.listener.uuid_verified = True
+
+    def InitRequestUUID(self) -> None:
+        self.private_uuid = str(self.server.user_info_file.MakePrivateUUID())
+        self.public_uuid = str(self.server.user_info_file.MakePublicUUID())
+        self.SendPacket("send_uuid", {"private": self.private_uuid, "public": self.public_uuid})
+        self._uuid_verified = True
+        self.listener.uuid_verified = True
+
+    def InitVersionCheck(self, client_version: int) -> None:
+        pass
+
+    def FullUpdate(self, placeholder=None) -> None:
+        self.SendPacket("channel_list", self.server.GetChannelList())
+        self.SendPacket("member_list", {"member_list": self.server.user_info_file.GetAllUsersPublic()})
+        self.SendPacket("server_info", {"server_name": self.server.name})
+        # self.SendEvent("full_update_finished")
+
+    def ReceiveUserInfo(self, user_info: dict) -> None:
+        self.username = user_info["content"]["username"]
+        if "user_info" not in user_info["content"]:
+            self.user_tag = self.server.user_info_file.MakeUserTag(self.username)
+            self.SendPacket("user_tag", {"user_tag": self.user_tag})
+        else:
+            self.user_tag = user_info["user_tag"]
+        self.server.user_info_file.AddUser(self.username, self.user_tag, str(self.private_uuid), str(self.public_uuid))
+        # self.FullUpdate()
 
     def ReceiveMessage(self, message: dict) -> None:
-        channel = self.server.GetChannel(message["channel"])
+        channel = self.server.GetChannel(message["content"]["channel"])
         channel.AddMessage(message)
         self.server.Broadcast("receive_message", message)
         
-    def SendChannelMessageRange(self, channel_name: str, start_message: int, direction: str = "back", message_count: int = 50) -> None:
+    def SendChannelMessageRange(self, event_dict: dict) -> None:
         # ask for a section of the channel event history
-        channel = self.server.GetChannel(channel_name)
-        channel_page = channel.GetMessages(start_message, message_count, direction)
+        channel = self.server.GetChannel(event_dict["content"]["channel_name"])
+        channel_page = channel.GetMessages(event_dict["content"]["message_index"],
+                                           50,  # might allow client to request more than 50 messages at a time
+                                                # also would need to check across event function versions
+                                           event_dict["content"]["direction"])
         # channel_page = channel.GetAllMessagesTest()
-        self.SendCommand("receive_channel_messages", {
-            "channel_name": channel_name,
-            "start_message": start_message,
-            "message_count": message_count,
+        self.SendPacket("channel_messages", {
+            "channel_name": event_dict["content"]["channel_name"],
+            "start_message": event_dict["content"]["message_index"],
+            "message_count": 50,
             "messages": channel_page,
         })
 
-    def RunCommand(self, cmd: Command) -> None:
-        if cmd.command in self.commands.keys():
-            self.commands[cmd.command](*cmd.args)
-    
+    def HandleEvent(self, event: dict) -> None:
+        if event["event"] in self.event_function_dict.keys():
+            if event["content"]:
+                self.event_function_dict[event["event"]](event)
+            else:
+                self.event_function_dict[event["event"]]()
+        else:
+            TimePrint("Unknown Event: " + event["event"])
+
     def Ping(self) -> None:
-        self.SendCommand("ping")
+        self.SendPacket("ping")
+        
+    def SendDisconnect(self, reason: str):
+        self.SendPacket("disconnect", {"reason": reason})
+        
+    def Close(self):
+        self.client.close()
+        self.listener.Stop()
+        self.server.RemoveClient(self.client)
+        self._stopping = True
 
     def run(self) -> None:
         TimePrint("socket running")
-        while True:
-            while len(self.listener.command_queue) > 0:
-                command = self.listener.command_queue[0]
-                self.RunCommand(command)
-                self.listener.command_queue.remove(self.listener.command_queue[0])
+        try:
+            while True:
+                while len(self.listener.event_queue) > 0:
+                    event = self.listener.event_queue[0]
+                    self.listener.event_queue.remove(event)
+                    self.HandleEvent(event)
+                    
+                if self._stopping or not self.listener.connected:
+                    break
+    
+                # apparently this loop was causing the cpu usage to go up to 10%
+                # and slow the whole program down by a shit ton, so just sleep for 0.1 seconds
+                sleep(0.1)
                 
-            if self._stopping or not self.listener.connected:
-                break
-
-            # apparently this loop was causing the cpu usage to go up to 10%
-            # and slow the whole program down by a shit ton, so just sleep for 0.1 seconds
-            time.sleep(0.1)
+        except Exception as F:
+            self.SendDisconnect(str(F))
+            print(F)
+            self.Close()
 
 
 # do i need to have the socket have the channels or some shit?
@@ -109,14 +224,19 @@ class Channel:
 
         # do we have a message table here?
         try:
+            # why does this not work
+            # CHECK(TYPEOF(time) == 'FLOAT')
+            # CHECK(TYPEOF(user) == 'CHAR')
+            # CREATE TABLE if not exists messages
             crsr.execute("""
 CREATE TABLE messages (
     time FLOAT,
-    user STRING,
-    text STRING,
-    file STRING
+    user CHAR(36) NOT NULL,
+    text TEXT(4096),
+    file TEXT(1024)
 );""")
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as F:
+            print(str(F))
             pass
 
     def GetMessageCount(self) -> int:
@@ -126,20 +246,11 @@ CREATE TABLE messages (
         file.close()
         return message_count
 
-    # 20 events per page
-    def GetPageCount(self) -> int:
-        message_count = self.GetMessageCount()
-        page_count = math.ceil(message_count / 20)
-        return page_count
-
-    # this may change, so have it be a function we can quickly change
-    def GetEventTableInputs(self) -> str:
-        return "(time, user, text, file)"
-
     def ConnectToFile(self) -> sqlite3.Connection:
         return sqlite3.connect("channels/" + self.name + ".db")
 
-    def SaveAndClose(self, file) -> None:
+    @staticmethod
+    def SaveAndClose(file: sqlite3.Connection) -> None:
         file.commit()
         file.close()
 
@@ -154,13 +265,19 @@ CREATE TABLE messages (
         file, cursor = self.OpenFile()
         # delete
         # cursor.execute("""DROP TABLE employee;""")
+        
+    def ExceptExcute(self, ):
+        pass
 
     # TODO: fix being able to put quotes in here, it doesn't work
     def AddMessage(self, message: dict) -> None:
         file, cursor = self.OpenFile()
+        # time_received = str(datetime.datetime.fromtimestamp(message["time_received"]))
         cursor.execute(
             """INSERT INTO messages (time, user, text, file) VALUES (?, ?, ?, ?);""",
-            (float(message["time"]), message["name"], message["text"], message["file"]))
+            # """INSERT INTO messages VALUES (?, ?, ?, ?);""",
+            (message["time_received"], message["content"]["name"],
+             message["content"]["text"], message["content"]["file"]))
         self.SaveAndClose(file)
     
     def GetAllMessagesTest(self) -> list:
@@ -173,16 +290,34 @@ CREATE TABLE messages (
     def GetMessages(self, start_message_index: int, message_count: int, msg_direction: str) -> dict:
         total_message_count = self.GetMessageCount() - 1
         file, cursor = self.OpenFile()
-        direction = "DESC" if msg_direction == "back" else "ASC"
-        if direction == "DESC":
+
+        if msg_direction == "back":
             start_message_index -= 1
-        elif direction == "ASC":
+            direction = "DESC"
+        elif msg_direction == "forward":
             start_message_index += 1
-        cursor.execute(
-            f"SELECT * FROM messages ORDER BY time {direction} limit {str(message_count)} offset {str(total_message_count - start_message_index)}")
+            direction = "ASC"
+        else:
+            return {}
+
+        # cmd = f"SELECT COUNT(?) from messages ORDER BY time {direction}"
+        # cmd = f"SELECT COUNT(?) from messages ORDER BY time {direction} offset 0"
+        cmd = f"SELECT * from messages ORDER BY time {direction} limit ?"
+        # cmd = f"SELECT * from messages ORDER BY time {direction} limit ? offset ?"
+        # cmd = "SELECT * from messages ORDER BY time " + direction
+        try:
+            # cursor.execute(cmd, (message_count, total_message_count - start_message_index))
+            # cursor.execute(cmd)  # 0 SUPPLIED
+            cursor.execute(cmd, (str(message_count),))  # 2 SUPPLIED
+            # WHAT THE FUCK
+            # cursor.execute(cmd, (direction, ))
+        except Exception as F:
+            print(str(F))
+            return {}
         messages = cursor.fetchall()
         file.close()
         message_dict = {}
+
         if direction == "DESC":
             for index, message in enumerate(messages):
                 message_dict[start_message_index - index] = message
@@ -207,7 +342,6 @@ CREATE TABLE messages (
 # TODO: make a server config file, like how we have a user config file for clients
 class Server:
     def __init__(self, name: str, ip: str, port: int, max_clients: int) -> None:
-        # super().__init__()
         self.name = name
         self.ip = ip
         self.port = int(port)
@@ -215,6 +349,7 @@ class Server:
 
         self.client_uuid_list = {}
         self.channel_list = []
+        self.user_info_file = UserInfoFile()
         self.server_config = ServerConfig(self)
 
         # The first argument AF_INET is the combined_address domain of the socket.
@@ -228,8 +363,8 @@ class Server:
         self.con_var_list = []
         self.con_command_dict = {
             "find": self.Find,  # TODO: move to cli_server?
-            "add_channel": self.UnfinishedCommand,
-            "rm_channel": self.UnfinishedCommand,
+            # "add_channel": self.AddChannel,
+            # "rm_channel": self.RemoveChannel,
         }
 
         self.Start()
@@ -242,17 +377,6 @@ class Server:
     def Close(self) -> None:
         self.socket.close()
         TimePrint("Server closed")
-        
-    def MakeUUID(self) -> UUID:
-        while True:
-            new_uuid = uuid4()
-            if str(new_uuid) not in self.client_uuid_list:
-                self.client_uuid_list[str(new_uuid)] = new_uuid
-                self.server_config.AddUserUUID(new_uuid)
-                return new_uuid
-            
-    def GetUserInfo(self, uuid: UUID) -> dict:
-        pass
 
     # this just returns an empty dict, why?
     def GetChannelList(self) -> dict:
@@ -280,7 +404,7 @@ class Server:
     # this will be used for when we receive a message or some shit idk
     def Broadcast(self, command: str, *args) -> None:
         for client in self.client_list:
-            client.SendCommand(command, *args)
+            client.SendPacket(command, *args)
 
     def Find(self, search: str) -> None:
         result = []
@@ -291,9 +415,6 @@ class Server:
             print(" - " + "\n - ".join(result))
         else:
             print("No results for \"" + search + "\" found")
-
-    def UnfinishedCommand(self, *values) -> None:
-        print("unfinished command")
 
     # this will handle ConVars
     def ListenConsole(self) -> None:
@@ -310,13 +431,15 @@ class Server:
     # def SendObject(self, client, obj) -> None:
     #     self.SendBytes(pickle.dumps(client, obj))
 
-    def SendBytes(self, client, _bytes: bytes) -> None:
+    def SendBytes(self, client, _bytes: bytes) -> bool:
         try:
             client.send(_bytes)
+            return True
         except Exception as F:
             print(str(F))
             client.close()
             self.RemoveClient(client)
+            return False
 
     def ListenForClients(self) -> None:
         # self.socket.setblocking(False)
@@ -333,19 +456,6 @@ class Server:
                 # prints the combined_address of the user that just connected
                 TimePrint("-------- {0} connected --------".format(addr))
                 
-                b_client_key = conn.recv(1024)
-                if b_client_key == b"request_uuid":
-                    new_client_uuid = self.MakeUUID()
-                    self.SendBytes(conn, new_client_uuid.bytes)
-                else:
-                    client_key = UUID(bytes=b_client_key)
-                    if str(client_key) not in self.client_uuid_list:
-                        self.SendBytes(conn, b"0")
-                        conn.close()
-                        continue
-                    else:
-                        self.SendBytes(conn, b"1")
-
                 # creates and individual thread for every user that connects
                 client = ServerClient(self, conn, addr)
                 client.start()
@@ -358,6 +468,164 @@ class Server:
             except Exception as F:
                 print(str(F))
                 continue
+
+
+class UserInfo:
+    def __init__(self, username: str = "", user_tag: int = 0, user_picture: str = "", public_uuid: str = "",
+                 private_uuid: str = "", join_date: float = 0.0, last_seen: float = 0.0):
+        self.username = username
+        self.user_tag = user_tag
+        self.user_picture = user_picture
+        self.public_uuid = public_uuid
+        self.private_uuid = private_uuid
+        self.join_date = join_date
+        self.last_seen = last_seen
+
+
+class UserInfoFile:
+    def __init__(self) -> None:
+        self.users = []
+        if not os.path.isfile("user_info.db"):
+            file, crsr = self.OpenFile()
+    
+            try:
+                # username VARCHAR(48)
+                crsr.execute("""
+            CREATE TABLE users (
+                username VARCHAR(48) NOT NULL,
+                user_tag TINYINT NOT NULL,
+                user_picture TEXT(2048),
+                public_uuid CHAR(16) NOT NULL,
+                private_uuid CHAR(16) NOT NULL,
+                join_date DATETIME NOT NULL,
+                last_seen DATETIME NOT NULL
+            );""")
+            except sqlite3.OperationalError as F:
+                print(str(F))
+        else:
+            self.InitUsers()
+
+    @staticmethod
+    def ConnectToFile() -> sqlite3.Connection:
+        return sqlite3.connect("user_info.db")
+
+    @staticmethod
+    def SaveAndClose(file) -> None:
+        file.commit()
+        file.close()
+
+    def OpenFile(self) -> tuple:
+        file = self.ConnectToFile()
+        return file, file.cursor()
+
+    def InitUsers(self) -> None:
+        user_list = self.GetAllUsers()
+        for user_tuple in user_list:
+            user = UserInfo(*user_tuple)
+            self.users.append(user)
+
+    def GetUserCount(self) -> int:
+        file, cursor = self.OpenFile()
+        cursor.execute("select count (*) from users;")
+        user_count = cursor.fetchone()[0]
+        file.close()
+        return user_count
+
+    def GetAllUsers(self) -> list:
+        file, cursor = self.OpenFile()
+        cursor.execute("SELECT * FROM users;")
+        users = cursor.fetchall()
+        if type(users) != list:
+            users = []
+        file.close()
+        return users
+    
+    def GetAllUsersPublic(self) -> dict:
+        private_uuid_user_list = self.GetAllUsers()
+        public_uuid_user_list = {}
+        for user in private_uuid_user_list:
+            user_info = [*user]
+            public_uuid = user_info[4]
+            user_info.remove(user_info[4])
+            user_info.remove(user_info[3])
+            public_uuid_user_list[public_uuid] = user_info
+        return public_uuid_user_list
+    
+    def GetAllUsersPublicOld(self) -> list:
+        private_uuid_user_list = self.GetAllUsers()
+        public_uuid_user_list = []
+        for user in private_uuid_user_list:
+            user_info = [*user]
+            user_info.remove(user_info[3])
+            public_uuid_user_list.append(user_info)
+        return public_uuid_user_list
+    
+    def _GetColumnInAllRows(self, column: int) -> list:
+        users = self.GetAllUsers()
+        items = []
+        for user in users:
+            items.append(user[column])
+        return items
+
+    def GetUsernames(self) -> list:
+        return self._GetColumnInAllRows(0)
+
+    def GetAllPrivateUUIDS(self) -> list:
+        return self._GetColumnInAllRows(3)
+
+    def GetAllPublicUUIDS(self) -> list:
+        return self._GetColumnInAllRows(4)
+
+    @staticmethod
+    def _MakeUUID(uuid_list: list) -> UUID:
+        while True:
+            new_uuid = uuid4()
+            if str(new_uuid) not in uuid_list:
+                return new_uuid
+        
+    def MakePrivateUUID(self) -> UUID:
+        return self._MakeUUID(self.GetAllPrivateUUIDS())
+
+    def MakePublicUUID(self) -> UUID:
+        return self._MakeUUID(self.GetAllPublicUUIDS())
+
+    def MakeUserTag(self, username: str) -> int:
+        username_list = self.GetUsernames()
+        return username_list.count(username) - 1 + 1
+        # if username in username_list:
+            # doesn't check if the tag is taken,
+            # just kind of assumes based on amount of users with that username
+            # get number of times X is in list
+        #     return username_list.count(username) - 1 + 1
+        # else:
+        #     return
+
+    def AddUser(self, username: str, user_tag: int, public_uuid: str, private_uuid: str, user_picture: str = ""):
+        file, cursor = self.OpenFile()
+        join_date = datetime.datetime.now().timestamp()
+        user_tuple = (username, user_tag, user_picture, public_uuid, private_uuid, join_date, join_date)
+        cursor.execute(
+            """INSERT INTO users (username, user_tag, user_picture, public_uuid, private_uuid, join_date, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?);""", user_tuple)
+        user = UserInfo(*user_tuple)
+        self.users.append(user)
+        self.SaveAndClose(file)
+
+    def GetUserInfoPrivate(self, private_uuid: str) -> UserInfo:
+        pass
+
+    def GetUserInfo(self, public_uuid: str) -> UserInfo:
+        pass
+
+    def UpdateUserInfo(self, public_uuid: str, username: str = "", user_tag: int = -1,
+                       user_picture: str = "", ast_seen: float = -1.0):
+        file, cursor = self.OpenFile()
+        user_info = self.GetUserInfo(public_uuid)
+        cursor.execute(
+            """INSERT INTO users (username, user_tag, user_picture, public_uuid, private_uuid, join_date, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);""",
+            (username, user_tag, user_picture, public_uuid, private_uuid, join_date, join_date))
+        self.SaveAndClose(file)
 
 
 class ServerConfig:
@@ -399,11 +667,7 @@ class ServerConfig:
     def AddChannel(self, channel_name: str) -> None:
         self.dkv_input.GetItem("channels").AddItem(channel_name, [])
         self.WriteChanges()
-        
-    def AddUserUUID(self, user_uuid: UUID) -> None:
-        self.dkv_input.GetItem("user_uuids").AddItem(str(user_uuid))
-        self.WriteChanges()
-        
+
     def SetServerName(self, server_name: str) -> None:
         self.dkv_input.GetItem("name").value = server_name
         self.WriteChanges()
