@@ -16,6 +16,7 @@ from api2.dir_tools import CreateDirectory
 # update this whenever the json dict format or encoding/decoding is changed,
 #  like something that won't be compatible across versions in SendPacket and/or Listener is changed
 PROTOCOL_VERSION = 1
+PACKET_VERSION = 1
 
 # how messages are sent/displayed,
 MESSAGE_VERSION = 1
@@ -68,6 +69,7 @@ class ServerClient(Thread):
             # "time_sent": datetime.datetime.now().timestamp(),
             "time_sent": time(),
             "time_received": None,
+            "packet_version": PACKET_VERSION,
         }
         try:
             string = self.EncodeData(json.dumps(cmd_dict))

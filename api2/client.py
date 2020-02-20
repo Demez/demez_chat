@@ -24,6 +24,7 @@ from api2.client_listener import ClientListener
 
 
 PROTOCOL_VERSION = 1
+PACKET_VERSION = 1
 
 
 # TODO: maybe move to another file? like client_server_cache.py?
@@ -89,6 +90,9 @@ class ServerCache:
         cmd_dict = {
             "event": content,
             "content": kwargs,
+            "time_sent": time(),
+            "time_received": None,
+            "packet_version": PACKET_VERSION,
         }
         try:
             string = self.EncodeData(json.dumps(cmd_dict))
