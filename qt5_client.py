@@ -96,9 +96,14 @@ class MessageView(QWidget):
         self.user_id = sender
         
         server = main_window.server_list.GetSelectedServerCache()
-        self.user = server.member_list[sender]
+        try:
+            self.user = server.member_list[sender]
+            self.name = QLabel(self.user[0])
+        except KeyError:
+            TimePrint("WARNING: member doesn't exist? " + sender)
+            self.user = sender
+            self.name = QLabel(sender)
         
-        self.name = QLabel(self.user[0])
         # TODO: format time based on computer settings
         self.time = QLabel(UnixToDateTime(unix_time).strftime("%Y-%m-%d - %H:%M:%S"))
         self.text = QLabel(text)
