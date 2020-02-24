@@ -32,7 +32,7 @@ class SocketListener:
         self.server.setblocking(not connected)
 
     def Print(self, string: str) -> None:
-        TimePrint(f"Listener - {self.combined_address}: {string}")
+        TimePrint(f"{self.combined_address}: {string}")
 
     def DecodeData(self, encoded_string: bytes):
         # TODO: finish this, need to decode, get json end char,
