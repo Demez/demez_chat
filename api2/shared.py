@@ -49,7 +49,7 @@ def GetDate() -> str:
 
 
 def GetDateAndTime() -> str:
-    return GetTime().strftime("%Y-%m-%d - %H:%M:%S")
+    return GetTime().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def GetTimeUnix() -> float:
