@@ -72,7 +72,8 @@ class ChatBox(QWidget):
     def SendMessage(self):
         if self.text_input.text():
             server_cache = main_window.server_list.GetSelectedServerCache()
-            server_cache.SendMessage(main_window.chat_view.current_channel, self.text_input.text())
+            message_dict = server_cache.SendMessage(main_window.chat_view.current_channel, self.text_input.text())
+            main_window.chat_view.SendMessage(message_dict)
             self.text_input.setText("")
             # TODO: have ChatView scroll down to bottom
 
@@ -80,8 +81,9 @@ class ChatBox(QWidget):
 class MessageView(QWidget):
     sig_embed = pyqtSignal(str, HTTPResponse)
 
-    def __init__(self, unix_time, sender: str, text: str, file: str = ""):
+    def __init__(self, msg_id: int, unix_time, sender: str, text: str, file: str = "", client_is_sender: bool = False):
         super().__init__()
+        self.msg_id = msg_id
         self.setLayout(QHBoxLayout())
 
         self.user_image_layout = QVBoxLayout()
@@ -104,9 +106,16 @@ class MessageView(QWidget):
             self.user = sender
             self.name = QLabel(sender)
         
-        # TODO: format time based on computer settings
-        self.time = QLabel(UnixToDateTime(unix_time).strftime("%Y-%m-%d - %H:%M:%S"))
+        if client_is_sender:
+            self.time = QLabel("message sending...")
+        else:
+            # TODO: format time based on computer settings
+            self.time = QLabel(UnixToDateTime(unix_time).strftime("%Y-%m-%d - %H:%M:%S"))
+        
         self.text = QLabel(text)
+        if client_is_sender:
+            # TODO: need something for different themes, like disabled text color or something
+            self.text.setStyleSheet("color: #737373;")
         
         self.name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.time.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -138,15 +147,9 @@ class MessageView(QWidget):
         self.header_layout.addStretch(1)
 
         self.message_layout.addWidget(self.text)
-        # self.message_layout.setSpacing(4)
-        # self.message_layout.setContentsMargins(QMargins(0, 0, 0, 0))
-        # self.message_layout.addStretch(0)
-
-        # self.layout().addWidget(self.name)
-        # self.layout().addWidget(self.time)
-        # self.layout().addWidget(self.text)
+        self.message_layout.addStretch(1)
+        
         self.layout().addStretch(0)
-
         self.layout().setContentsMargins(QMargins(0, 0, 0, 0))
         self.layout().setSpacing(6)
         self.setContentsMargins(QMargins(0, 0, 0, 0))
@@ -160,7 +163,9 @@ class MessageView(QWidget):
             bad_download_thread = Thread(target=DownloadURL, args=(url, self.sig_embed.emit))
             bad_download_thread.start()
 
-        # self.setStyleSheet("border: 2px solid; border-color: #660000;")
+    def FinishedSending(self, new_time=None):
+        self.time.setText(UnixToDateTime(new_time).strftime("%Y-%m-%d - %H:%M:%S"))
+        self.text.setStyleSheet("")
 
     def CheckForURL(self) -> list:
         url_list = []
@@ -207,6 +212,7 @@ class ChatView(QScrollArea):
         
         self.current_channel = ""
         self.messages = {}
+        self.sending_messages = []
         self.messages_list = []
 
         self.verticalScrollBar().valueChanged.connect(self.ScrollUpdate)
@@ -242,6 +248,9 @@ class ChatView(QScrollArea):
     @staticmethod
     def GetMaxMessageIndex(messages: dict) -> int:
         return max(map(int, messages.keys()))
+    
+    def GetNewestMessageIndex(self) -> int:
+        return max(map(int, self.messages.keys())) + 1
 
     # TODO: use QListModel or something and prepend and append messages to it
     #  get the min and max indexes from the dictionary and use a while loop to get the messages sorted
@@ -266,7 +275,9 @@ class ChatView(QScrollArea):
             dict_index += 1
         TimePrint("adding messages time: " + str(perf_counter() - start_time))
     
-    def AddMessage(self, index: int, message: list) -> None:
+    def AddMessage(self, index: int, message: list, message_sending: bool = False) -> None:
+        if index in self.messages:
+            self.MessageFinishedSending(index, )
         # what this does is go through all the messages in a list of the message indexes
         # this is so we can insert a message in the correct spot
         # probably slow and very messy, but idc right now, it works, i can change it later
@@ -295,7 +306,7 @@ class ChatView(QScrollArea):
 
         # insert the message after this one (+1) and skip the spacer (another +1)
         insert_index = min_index + 2
-        message_qt = MessageView(*message)
+        message_qt = MessageView(index, *message, message_sending)
         self.messages[index] = message_qt
         # increment by 1 to skip the spacer we have
         self.message_contents_layout.insertWidget(insert_index, message_qt)
@@ -310,6 +321,26 @@ class ChatView(QScrollArea):
     # message has been updated
     def UpdateMessage(self, event) -> None:
         pass
+    
+    def SendMessage(self, message_dict: dict) -> None:
+        # msg_id: int, unix_time, sender: str, text: str, file: str = "", client_is_sender
+        msg_id = max(map(int, self.messages.keys())) + 1
+        message_qt = MessageView(msg_id, message_dict["time"], message_dict["name"],
+                                 message_dict["text"], message_dict["file"], True)
+        self.messages[msg_id] = message_qt
+        self.sending_messages.append((message_dict, message_qt))
+        self.message_contents_layout.addWidget(message_qt)
+            
+    def CheckForSendingMessage(self, message_dict: dict) -> bool:
+        message_compare = message_dict.copy()
+        del message_compare["time_received"]
+        
+        for message_list in self.sending_messages:
+            if message_list[0] == message_compare:
+                message_qt = message_list[1]
+                message_qt.FinishedSending(message_dict["time_received"])
+                return True
+        return False
     
     # TODO: this isn't really working the way i want it to right now
     #  need to be able to prepend messages (that QModel thing?)
@@ -548,7 +579,11 @@ class MainWindow(QWidget):
         content = message["content"]
         channel = server_cache.message_channels[content["channel"]]
         message_tuple = [content["time"], content["name"], content["text"], content["file"]]
-        self.chat_view.AddMessage(channel["message_count"], message_tuple)
+        if content["name"] == server_cache.public_uuid:
+            if not self.chat_view.CheckForSendingMessage(content):
+                self.chat_view.AddMessage(channel["message_count"], message_tuple)
+        else:
+            self.chat_view.AddMessage(channel["message_count"], message_tuple)
         channel["message_count"] += 1
         print("uhhh")
         

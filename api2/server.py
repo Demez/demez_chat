@@ -71,6 +71,7 @@ class ServerClient(Thread):
             "time_received": None,
             "packet_version": PACKET_VERSION,
         }
+        TimePrint("Sending Packet: " + event)
         try:
             string = self.EncodeData(json.dumps(cmd_dict))
         except Exception as F:
@@ -155,6 +156,7 @@ class ServerClient(Thread):
     def ReceiveMessage(self, message: dict) -> None:
         channel = self.server.GetChannel(message["content"]["channel"])
         channel.AddMessage(message)
+        message["content"]["time_received"] = message["time_received"]
         self.server.Broadcast("receive_message", message)
         
     def SendChannelMessageRange(self, event_dict: dict) -> None:

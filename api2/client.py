@@ -94,6 +94,7 @@ class ServerCache:
             "time_received": None,
             "packet_version": PACKET_VERSION,
         }
+        TimePrint("Sending Packet: " + content)
         try:
             string = self.EncodeData(json.dumps(cmd_dict))
         except Exception as F:
@@ -333,7 +334,8 @@ class ServerCache:
         add_message = {channel["message_count"]: (content["time"], content["name"], content["text"], content["file"])}
         self.AddMessages(content["channel"], add_message)
 
-    def SendMessage(self, channel_name: str, message, file: str = "") -> None:
+    def SendMessage(self, channel_name: str, message, file: str = "") -> dict:
+        # return the time sent
         command_value = {
             "channel": channel_name,
             "time": GetTimeUnix(),  # probably useless
@@ -341,7 +343,8 @@ class ServerCache:
             "text": message,
             "file": file,
         }
-        self.SendPacket("send_message", command_value)
+        if self.SendPacket("send_message", command_value):
+            return command_value
 
 
 class Client(Thread):
