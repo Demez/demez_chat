@@ -194,6 +194,7 @@ class ServerClient(Thread):
         self.listener.Stop()
         self.server.RemoveClient(self.client)
         self._stopping = True
+        TimePrint(f"Disconnected - {self.address}")
 
     def run(self) -> None:
         TimePrint("socket running")
@@ -205,6 +206,7 @@ class ServerClient(Thread):
                     self.HandleEvent(event)
                     
                 if self._stopping or not self.listener.connected:
+                    self.Close()
                     break
     
                 # apparently this loop was causing the cpu usage to go up to 10%
@@ -458,7 +460,7 @@ class Server:
                 conn, addr = self.socket.accept()
 
                 # prints the combined_address of the user that just connected
-                TimePrint("-------- {0} connected --------".format(addr))
+                TimePrint(f"Connected - {addr}")
                 
                 # creates and individual thread for every user that connects
                 client = ServerClient(self, conn, addr)
