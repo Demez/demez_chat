@@ -40,7 +40,8 @@ class SocketListener(Thread):
         client_command_json = json.loads(obj_bytes)
         client_command_json["time_received"] = time()
         self.event_queue.append(client_command_json)
-        self.Print("received event: " + str(client_command_json["event"]))
+        ping = str(round(client_command_json["time_received"] - client_command_json["time_sent"], 6))
+        self.Print("Received Packet in " + ping + ": " + str(client_command_json["event"]))
         return True
     
     def _CheckConnection(self, _bytes: bytes) -> bool:
@@ -69,7 +70,7 @@ class SocketListener(Thread):
 
             except Exception as F:
                 self.Print(str(F))
-                break
+                # break
                 
             if self._stop:
                 break
