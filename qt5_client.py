@@ -214,8 +214,13 @@ class ChatView(QScrollArea):
         self.messages = {}
         self.sending_messages = []
         self.messages_list = []
+        
+        self._last_scroll_value = -1
+        self._last_scroll_max = -1
+        self._scroll_stay_in_place = False
 
-        self.verticalScrollBar().valueChanged.connect(self.ScrollUpdate)
+        self.verticalScrollBar().rangeChanged.connect(self.ScrollRangeChanged)
+        self.verticalScrollBar().valueChanged.connect(self.ScrollValueChanged)
 
         self.sig_add_message.connect(self.AddMessage)
         
@@ -234,6 +239,9 @@ class ChatView(QScrollArea):
         self.messages.clear()
         RemoveWidgets(self.GetLayout())
         main_window.chat_box.Enable()
+        self._last_scroll_value = -1
+        self._last_scroll_max = -1
+        self._scroll_stay_in_place = False
         
     def Clear(self):
         self.messages.clear()
@@ -345,8 +353,9 @@ class ChatView(QScrollArea):
     # TODO: this isn't really working the way i want it to right now
     #  need to be able to prepend messages (that QModel thing?)
     #  also need to check if we already have the messages, just grabs the message again for some reason
-    def ScrollUpdate(self, value: int) -> None:
+    def ScrollValueChanged(self, value: int) -> None:
         server = main_window.server_list.GetSelectedServerCache()
+        self._last_scroll_value = value
         if not self.messages or len(self.messages) == server.message_channels[self.current_channel]["message_count"]:
             return
         
@@ -355,12 +364,32 @@ class ChatView(QScrollArea):
             # request older messages
             if min(self.messages) > 0:
                 server.RequestChannelMessageRange(self.current_channel, min(self.messages))
+                self._scroll_stay_in_place = True
 
         # bottom/right end
         elif value == self.verticalScrollBar().maximum():
             # request newer messages
             if max(self.messages) < server.message_channels[self.current_channel]["message_count"] - 1:
                 server.RequestChannelMessageRange(self.current_channel, max(self.messages), "forward")
+                self._scroll_stay_in_place = True
+
+    def ScrollRangeChanged(self, min_value: int, max_value: int) -> None:
+        if self._last_scroll_value == -1:
+            self.verticalScrollBar().setValue(max_value)
+        elif self._last_scroll_max != -1:
+            if self._scroll_stay_in_place:
+                self.verticalScrollBar().setValue(max_value - self._last_scroll_max)
+                self._scroll_stay_in_place = False
+            elif self._last_scroll_max == self._last_scroll_value:
+                self.verticalScrollBar().setValue(max_value)
+                
+        self._last_scroll_max = max_value
+        
+    def IsScrollBarAtMax(self) -> bool:
+        return self.verticalScrollBar().value() == self.verticalScrollBar().maximum()
+        
+    def IsScrollBarAtMin(self) -> bool:
+        return self.verticalScrollBar().value() == self.verticalScrollBar().minimum()
 
 
 class MenuBar(QMenuBar):
