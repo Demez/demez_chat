@@ -17,6 +17,7 @@ class SocketListener(Thread):
         self._stop = False
     
     def Stop(self) -> None:
+        self.connected = False
         self._stop = True
     
     def Print(self, string: str) -> None:
@@ -61,11 +62,8 @@ class SocketListener(Thread):
                 self.JsonLoads(decoded_data)
             
             # TODO: have this thread be killed when we get here
-            #  also i only get this on linux
-            except EOFError:
-                break
-                
-            except ConnectionAbortedError:
+            except (EOFError, ConnectionAbortedError, ConnectionResetError):
+                self.connected = False
                 break
 
             except Exception as F:
@@ -73,4 +71,5 @@ class SocketListener(Thread):
                 # break
                 
             if self._stop:
+                self.connected = False
                 break
