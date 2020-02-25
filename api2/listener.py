@@ -25,7 +25,7 @@ class SocketListener(Thread):
         # TimePrint(f"Listener - {self.protocol}: {string}")
         TimePrint(f"Listener: {string}")
 
-    def DecodeData(self, encoded_string: str):
+    def DecodeData(self, encoded_string: bytes) -> bytes:
         # TODO: finish this, need to decode, get json end char,
         #  and add anything after back to the start of the buffer
         #  needs some more changes from the client_listener
@@ -35,7 +35,12 @@ class SocketListener(Thread):
             return Decode(self.server.private_uuid, encoded_string)
         else:
         '''
-        return base64.b64decode(encoded_string).decode()
+        final_string = b""
+        for string in encoded_string.split(b"=="):
+            if not string:
+                continue
+            final_string += base64.b64decode(string + b"==")
+        return final_string
     
     def JsonLoads(self, obj_bytes: bytes) -> bool:
         client_command_json = json.loads(obj_bytes)
@@ -58,8 +63,7 @@ class SocketListener(Thread):
                 client_bytes = self.socket.recv(8192)
                 if not self._CheckConnection(client_bytes):
                     break
-                decoded_data = self.DecodeData(client_bytes)
-                self.JsonLoads(decoded_data)
+                self.JsonLoads(self.DecodeData(client_bytes))
             
             # TODO: have this thread be killed when we get here
             except (EOFError, ConnectionAbortedError, ConnectionResetError):

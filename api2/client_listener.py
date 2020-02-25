@@ -34,7 +34,7 @@ class SocketListener:
     def Print(self, string: str) -> None:
         TimePrint(f"{self.combined_address}: {string}")
 
-    def DecodeData(self, encoded_string: bytes):
+    def DecodeData(self, encoded_string: bytes) -> bytes:
         # TODO: finish this, need to decode, get json end char,
         #  and add anything after back to the start of the buffer
         #  same with server, except it needs some more changes from this
@@ -44,7 +44,12 @@ class SocketListener:
             return Decode(self.private_uuid, encoded_string)
         else:
         '''
-        return base64.b64decode(encoded_string)
+        final_string = b""
+        for string in encoded_string.split(b"=="):
+            if not string:
+                continue
+            final_string += base64.b64decode(string + b"==")
+        return final_string
 
     # IDEA: use regex (maybe?) to split by "{" and "}",
     #  and store the indexes for them, and then count them
