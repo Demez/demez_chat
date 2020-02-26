@@ -4,7 +4,7 @@ import base64
 import socket
 from threading import Thread
 from api2.shared import Decode, TimePrint
-from time import sleep
+from time import time, sleep
 
 
 def Print(string: str) -> None:
@@ -45,7 +45,7 @@ class SocketListener:
         else:
         '''
         final_string = b""
-        for string in encoded_string.split(b"=="):
+        for string in encoded_string.split(b"="):
             if not string:
                 continue
             final_string += base64.b64decode(string + b"==")
@@ -80,6 +80,9 @@ class SocketListener:
             char_index += 1
             if depth == 0:
                 break
+                
+        if char_index == len(buffer) and buffer[-1] != "}":
+            return None
         return char_index
 
     def JsonBuffer(self) -> bool:
@@ -87,9 +90,12 @@ class SocketListener:
             return True
         
         char_index = self.GetEndCharIndex(self._buffer.decode("utf-8"))
+        if char_index is None:
+            # incomplete, need to call socket.recv again
+            return True
         try:
             client_command_dict = json.loads(self._buffer[:char_index].decode())
-            # self.event_queue.append(client_command_dict)
+            client_command_dict["time_received"] = time()
             self.client.event_queue[self.combined_address].append(client_command_dict)
             self.ClearBuffer(char_index)
             self.Print("received event: " + client_command_dict["event"])
