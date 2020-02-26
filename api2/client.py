@@ -214,7 +214,7 @@ class ServerCache:
         try:
             while True:
                 if self.server_listener.receiving_data:
-                    print("receiving data oh shit")
+                    pass
                 elif self.client.listener.event_queue[self.address]:
                     event = self.client.listener.event_queue[self.address][0]
                     self.client.listener.event_queue[self.address].remove(event)
