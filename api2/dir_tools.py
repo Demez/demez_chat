@@ -7,18 +7,12 @@ import os
 import shutil
 
 
-def CreateDirectory(directory):
-    try:
+def CreateDirectory(directory: str):
+    if not os.path.isdir(directory):
         os.makedirs(directory)
-    except FileExistsError:
-        pass
-    except WindowsError:
-        pass
-    except Exception as F:
-        print(str(F))
         
         
-def GetAllFilesInDir(directory=os.getcwd(), required_exts=None):
+def GetAllFilesInDir(directory: str = os.getcwd(), required_exts: list = None) -> list:
     files = []
     for file in os.listdir(directory):
         if required_exts:
@@ -63,13 +57,8 @@ def ReplaceDateModified( file, mod_time ):
         pass
 
 
-# TODO: these below are not related to directories and files
-#  move to a new file, maybe dict_tools.py?
-#  or rename this file to py_tools.py
 def CreateNewDictValue(dictionary, key, value_type):
-    try:
-        dictionary[key]
-    except KeyError:
+    if not dictionary[key]:
         dictionary[key] = value_type
 
 

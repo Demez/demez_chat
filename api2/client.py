@@ -1,14 +1,15 @@
 import os
 import json
 import socket
-import ipaddress
 # from uuid import UUID
 from threading import Thread
 from time import sleep
 
+from ftplib import FTP, FTP_TLS
+
 from api2.shared import *
 from api2.client_user_config import UserConfig
-from api2.client_listener import ClientListener
+from api2.listener import ClientListenerHandler
 
 # TODO: try using name decorators here
 # TODO: maybe use some sync thing? maybe change client init to sync?
@@ -24,22 +25,22 @@ from api2.client_listener import ClientListener
 
 
 PROTOCOL_VERSION = 1
-PACKET_VERSION = 1
+PACKET_VERSION = 2
 
 
 # TODO: maybe move to another file? like client_server_cache.py?
-class ServerCache:
-    def __init__(self, client, ip: str, port: int, name: str, user_tag: int, private_uuid: str, public_uuid: str):
+class ServerCache(BaseClient):
+    def __init__(self, client, ip: str, port: int, ftp_port: int,
+                 name: str, user_tag: int, private_uuid: str, public_uuid: str):
+        super().__init__(self._NewSocket(), ip, port)
         self.client = client
         self.name = name
         self.user_tag = user_tag
-
-        # TODO: test ipv6 support, iirc some changes are needed
-        self.ip = ip
-        self.port = port
-        self._ipv6 = True if ipaddress.ip_address(ip).version == 6 else False
-        self.address = f"[{self.ip}]:{self.port}" if self._ipv6 else f"{self.ip}:{self.port}"
-        self.socket = self._NewSocket()
+        
+        self.ftp_port = ftp_port
+        self.ftp_ip = ip  # temp, use actual ftp ip later
+        self.ftp_address = f"{ip}:{ftp_port}"
+        self.ftp_con = None
         
         self._closing = False
         self._connected = False
@@ -47,15 +48,15 @@ class ServerCache:
         self.private_uuid = private_uuid
         self.public_uuid = public_uuid
         # self.cipher = AES.new(bytes(self.private_uuid), AES.MODE_ECB)
-        self.server_listener = self.client.listener.AddServer(self.socket, self.address, self.name,
-                                                              self.private_uuid, self.public_uuid)
+        self.listener = self.client.listener.AddServer(self.socket, self.address, self.name,
+                                                       self.private_uuid, self.public_uuid)
         
         self.message_channels = {}  # channel_id: channel_info
         self.channels_voice = {}  # channel_id: channel_info
         self.channels_categories = {}  # category_name: list of channel names in specific order (or freely move them?)
         self.member_list = {}  # public_uuid: user_info
 
-        self._event_function_dict = {
+        self.event_function_dict.update({
             "disconnect": self.HandleDisconnect,
             "channel_list": self.ChannelListUpdate,
             "member_list": self.MemberListUpdate,
@@ -80,27 +81,7 @@ class ServerCache:
             # "channel_added": self.ChannelAdded,
             # "channel_edited": self.ChannelEdited,
             # "channel_removed": self.ChannelRemoved,
-        }
-        
-    def SendPacket(self, content: str, kwargs: dict = None) -> bool:
-        if self._closing:
-            return False
-        if not kwargs:
-            kwargs = {}
-        cmd_dict = {
-            "event": content,
-            "content": kwargs,
-            "time_sent": time(),
-            "time_received": None,
-            "packet_version": PACKET_VERSION,
-        }
-        TimePrint("Sending Packet: " + content)
-        try:
-            string = self.EncodeData(json.dumps(cmd_dict))
-        except Exception as F:
-            print(str(F))
-            return False
-        return self.SendBytes(string)
+        })
 
     def SendBytes(self, _bytes: bytes) -> bool:
         try:
@@ -109,34 +90,6 @@ class ServerCache:
         except ConnectionResetError:
             self.Disconnect()
             return False
-            
-    def EncodeData(self, json_string: str):
-        # look at listener decode function
-        '''
-        if self._uuid_verified:
-            encoded = Encode(self.private_uuid, json_string)
-        else:
-        '''
-        # use base64 until the server verifies/sends the UUID
-        encoded = base64.b64encode(json_string.encode("utf-8"))
-        return encoded
-        
-    def GetEventList(self) -> list:
-        return list(self._event_function_dict)
-        
-    def GetEventFunction(self, event: str) -> classmethod:
-        try:
-            return self._event_function_dict[event]
-        except KeyError:
-            pass
-        
-    def HandleEvent(self, cmd: dict) -> bool:
-        try:
-            self._event_function_dict[cmd["event"]](cmd["content"])
-            return True
-        except KeyError as F:
-            print(F)
-            return False
         
     def IsConnected(self) -> bool:
         return self._connected
@@ -144,7 +97,6 @@ class ServerCache:
     def IsClosing(self) -> bool:
         return self._closing
 
-    # how would you add connecting to the ftp server here?
     def Connect(self) -> None:
         try:
             TimePrint("Trying to connect to \"" + self.address + '"')
@@ -155,14 +107,14 @@ class ServerCache:
                 self._UpdateSocket()
                 return
             # send or request a uuid
-            self.server_listener.SetConnected(True)
+            self.listener.SetConnected(True)
             if not self._InitServerKey():
-                self.server_listener.SetConnected(False)
+                self.listener.SetConnected(False)
                 if not self._closing:
                     self.Disconnect()
                 return
             self._uuid_verified = True
-            self.server_listener.uuid_verified = True
+            self.listener.uuid_verified = True
             TimePrint("Connected to {0}".format(self.address))
 
             user_info_dict = {
@@ -179,11 +131,13 @@ class ServerCache:
             
             # wait for the server to give us a tag
             if self.user_tag is None:
-                self.HandleEvent(self.WaitForServerResponse())
+                response = self.WaitForServerResponse()
+                if response:
+                    self.HandleEvent(response)
             
             self.RequestFullUpdateWait()
             self._connected = True
-            if not self.server_listener.connected:
+            if not self.listener.connected:
                 self.Disconnect()
                 return
             self.client.RunServerConnectionChangeCallback(self.address, True)
@@ -191,40 +145,52 @@ class ServerCache:
             # the server only now stores the uuid, as it also stores the user info with it
             self.client.user_config.SetServerInfo(self.ip, self.port, self.private_uuid,
                                                   self.public_uuid, self.user_tag, self.name)
+            
+            TimePrint("Connecting to FTP Server...")
+
+            # try connecting to the ftp server now i guess
+            # self.ftp_con = FTP(self.ftp_address, self.public_uuid, self.private_uuid)
+            self.ftp_con = FTP()
+            self.ftp_con.connect(self.ip, self.ftp_port)
+            self.ftp_con.login(self.public_uuid, self.private_uuid)
+            
+            TimePrint("ftp connection WORKED")
 
         except (TimeoutError, socket.timeout, ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError):
             self._connected = False
             self._uuid_verified = False
-            self.server_listener.SetConnected(False)
+            self.listener.SetConnected(False)
             return
 
         except OSError as F:
             if os.name == "nt" and F.errno in (10038, 10057):
                 self._connected = False
                 self._uuid_verified = False
-                self.server_listener.SetConnected(False)
+                self.listener.SetConnected(False)
                 return
             else:
                 print(str(F))
     
         except Exception as F:
-            print(str(F))
+            PrintException(F, "Unhandled Exception Connecting To Server: ")
         
-    def WaitForServerResponse(self) -> dict:
+    # awful
+    def WaitForServerResponse(self) -> Packet:
         try:
+            TimePrint("Waiting for server response")
             while True:
-                if self.server_listener.receiving_data:
+                if self.listener.receiving_data:
                     pass
                 elif self.client.listener.event_queue[self.address]:
                     event = self.client.listener.event_queue[self.address][0]
                     self.client.listener.event_queue[self.address].remove(event)
                     return event
-                elif not self.server_listener.connected:
-                    return {}
+                elif not self.listener.connected:
+                    return None
                 sleep(0.1)
         except Exception as F:
-            print(str(F))
-            return {}
+            PrintException(F, "Unhandled Exception Connecting To Server: ")
+            return None
         
     def _InitServerKey(self) -> bool:
         try:
@@ -235,24 +201,25 @@ class ServerCache:
                 if not response:
                     return False
                 self.client.listener.server_init_list.remove(self.address)
-                if response["event"] == "valid_uuid":
+                if response.event == "valid_uuid":
                     return True
                 else:
                     self.SendPacket("fuck")
-                    self.Disconnect(response["event"])
+                    self.Disconnect(response.event)
                     return False
             else:
                 if not self.SendPacket("request_uuid"):
                     return False
                 response = self.WaitForServerResponse()
                 self.client.listener.server_init_list.remove(self.address)
-                if response["event"] == "send_uuid":
-                    self.private_uuid = response["content"]["private"]
-                    self.public_uuid = response["content"]["public"]
+                if response and response.event == "send_uuid":
+                    self.private_uuid = response.content["private"]
+                    self.public_uuid = response.content["public"]
                     return True
+                return False
 
         except KeyError as F:
-            print(str(F))
+            PrintException(F, "KeyError Handling Server Key: ")
 
     # useless?
     def RequestFullUpdateWait(self) -> None:
@@ -270,7 +237,7 @@ class ServerCache:
         self._closing = True
         self._connected = False
         self._uuid_verified = False
-        self.server_listener.uuid_verified = False
+        self.listener.uuid_verified = False
         if reason:
             TimePrint("Disconnected: " + reason)
         else:
@@ -283,7 +250,7 @@ class ServerCache:
         self.socket.close()
         self.socket = self._NewSocket()
         self.client.listener.server_init_list.append(self.address)
-        self.client.listener.ReplaceSocket(self.socket, self.address, "")
+        self.client.listener.ReplaceSocket(self.socket, self.address)
         
     # detach and close doesn't work
     @staticmethod
@@ -292,24 +259,34 @@ class ServerCache:
         socket_.settimeout(1)  # might be too short of a timeout, idk
         socket_.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return socket_
+        
+    def UploadFile(self, file_path: str):
+        if file_path:
+            with open(file_path, "rb") as file_read:
+                self.ftp_con.storbinary(f"STOR {os.path.basename(file_path).replace(' ', '_')}", file_read)
     
-    def HandleDisconnect(self, disconnect: dict) -> None:
-        self.Disconnect(disconnect["reason"])
+    # =============================================================================================================
+    # ALL EVENTS
+    
+    def HandleDisconnect(self, disconnect: Packet) -> None:
+        self.Disconnect(disconnect.content["reason"])
 
-    def ReceiveServerInfo(self, server_info: dict) -> None:
-        self.name = server_info["server_name"]
+    def ReceiveServerInfo(self, server_info: Packet) -> None:
+        self.name = server_info.content["server_name"]
 
-    def ChannelListUpdate(self, channel_list: dict) -> None:
-        self.message_channels = channel_list
+    def ChannelListUpdate(self, channel_list: Packet) -> None:
+        self.message_channels = channel_list.content
+        if channel_list.content == {}:
+            print("hold on")
         for message_channel in self.message_channels:
             self.message_channels[message_channel]["messages"] = {}
             
-    def MemberListUpdate(self, member_dict: dict) -> None:
+    def MemberListUpdate(self, member_dict: Packet) -> None:
         # self.member_list = member_dict
-        self.member_list.update(member_dict["member_list"])
+        self.member_list.update(member_dict.content["member_list"])
             
-    def ReceiveUserTag(self, user_tag: dict) -> None:
-        self.user_tag = user_tag["user_tag"]
+    def ReceiveUserTag(self, user_tag: Packet) -> None:
+        self.user_tag = user_tag.content["user_tag"]
 
     def RequestChannelMessageRange(self, channel_name: str, message_index: int, direction: str = "back") -> None:
         if direction not in {"back", "forward"}:
@@ -320,25 +297,24 @@ class ServerCache:
             "direction": direction
         })
 
-    def ReceiveChannelMessageRange(self, channel_page: dict) -> None:
-        # channel = self.message_channels[channel_page["channel_name"]]
-        self.AddMessages(channel_page["channel_name"], channel_page["messages"])
+    def ReceiveChannelMessageRange(self, channel_page: Packet) -> None:
+        self.AddMessages(channel_page.content["channel_name"], channel_page.content["messages"])
         
     def AddMessages(self, channel: str, messages: dict) -> None:
         self.message_channels[channel]["messages"].update({int(k): v for k, v in messages.items()})
         self.message_channels[channel]["messages"] = dict(sorted(self.message_channels[channel]["messages"].items()))
 
-    def ReceiveMessage(self, message: dict) -> None:
-        content = message["content"]
+    def ReceiveMessage(self, message: Packet) -> None:
+        content = message.content
         channel = self.message_channels[content["channel"]]
-        add_message = {channel["message_count"]: (content["time"], content["name"], content["text"], content["file"])}
+        add_message = {channel["count"]: (content["time"], content["name"], content["text"], content["file"])}
         self.AddMessages(content["channel"], add_message)
 
     def SendMessage(self, channel_name: str, message, file: str = "") -> dict:
         # return the time sent
         command_value = {
             "channel": channel_name,
-            "time": GetTimeUnix(),  # probably useless
+            "time": time(),
             "name": self.public_uuid,
             "text": message,
             "file": file,
@@ -360,11 +336,12 @@ class Client(Thread):
         self._is_started = False  # would be _started, but that's used by threading
         self._stopping = False
         self._command_queue = []
-        self.listener = ClientListener(self)
+        self.listener = ClientListenerHandler(self)
         
         for saved_server in self.user_config.bookmarks:
             self.server_list.append(ServerCache(
-                self, saved_server.ip, saved_server.port, saved_server.name,
+                # PLACEHOLDER PORT NUMBER
+                self, saved_server.ip, saved_server.port, 1235, saved_server.name,
                 saved_server.user_tag, saved_server.private_uuid, saved_server.public_uuid))
             
         self.listener.start()
@@ -379,7 +356,7 @@ class Client(Thread):
                         server.Connect()
                 sleep(4)
             except Exception as F:
-                print("ConnectThread: " + str(F))
+                PrintException(F, "ConnectThread Exception: ")
     
     def SetServerConnectionChangeCallback(self, func: classmethod) -> None:
         self._connected_callback = func
@@ -399,13 +376,14 @@ class Client(Thread):
             if server.address == address:
                 return server
 
-    def HandleServerCacheEvent(self, address: str, cmd: dict) -> None:
+    def HandleServerCacheEvent(self, address: str, packet: Packet) -> None:
         server_cache = self.GetServerCache(address)
-        if server_cache.HandleEvent(cmd):
-            if cmd["event"] in self._event_callbacks.keys():
-                self._event_callbacks[cmd["event"]](cmd["event"], cmd["content"])
+        if server_cache.HandleEvent(packet):
+            if packet.event in self._event_callbacks.keys():
+                self._event_callbacks[packet.event](packet)
         else:
-            TimePrint("unknown event: " + cmd["event"])
+            TimePrint("Unknown Event: " + packet.event)
+            server_cache.SendPacket("error", {"msg": f"Unknown Event: {packet.event}"})
 
     def run(self) -> None:
         connect_thread = Thread(name="ConnectThread", target=self._ConnectThread)
@@ -419,8 +397,8 @@ class Client(Thread):
                     continue
                     
                 # check if server is still up through listener
-                # server_listener = self.listener.GetServer(address)
-                if not server_cache.server_listener.connected and server_cache.IsConnected():
+                # listener = self.listener.GetServer(address)
+                if not server_cache.listener.connected and server_cache.IsConnected():
                     self.listener.event_queue[address].clear()
                     server_cache.Disconnect()
                     continue

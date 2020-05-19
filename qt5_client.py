@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from qt5_bookmark_manager import BookmarkManager
 from qt5_client_embed import *
 from api2.client import Client, ServerCache
-from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime
+from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime, Packet
 
 # for pycharm, install pyqt5-stubs, so you don't get 10000 errors for no reason
 from PyQt5.QtWidgets import *
@@ -265,7 +265,8 @@ class ChatView(QScrollArea):
     #  for removing messages, just remove it from QListModel, easy (hopefully)
     #  also need to make adding messages more efficient, the current way is way too slow
     # total message count
-    def MessageUpdate(self, channel: dict) -> None:
+    def MessageUpdate(self, packet: Packet) -> None:
+        channel = packet.content
         if not channel["messages"]:
             return
         start_time = perf_counter()
@@ -285,7 +286,7 @@ class ChatView(QScrollArea):
     
     def AddMessage(self, index: int, message: list, message_sending: bool = False) -> None:
         if index in self.messages:
-            self.MessageFinishedSending(index, )
+            TimePrint(f"message already added? {message}")
         # what this does is go through all the messages in a list of the message indexes
         # this is so we can insert a message in the correct spot
         # probably slow and very messy, but idc right now, it works, i can change it later
@@ -332,7 +333,7 @@ class ChatView(QScrollArea):
     
     def SendMessage(self, message_dict: dict) -> None:
         # msg_id: int, unix_time, sender: str, text: str, file: str = "", client_is_sender
-        msg_id = max(map(int, self.messages.keys())) + 1
+        msg_id = 0 if not self.messages else max(map(int, self.messages.keys())) + 1
         message_qt = MessageView(msg_id, message_dict["time"], message_dict["name"],
                                  message_dict["text"], message_dict["file"], True)
         self.messages[msg_id] = message_qt
@@ -341,12 +342,12 @@ class ChatView(QScrollArea):
             
     def CheckForSendingMessage(self, message_dict: dict) -> bool:
         message_compare = message_dict.copy()
-        del message_compare["time_received"]
+        del message_compare["recv"]
         
         for message_list in self.sending_messages:
             if message_list[0] == message_compare:
                 message_qt = message_list[1]
-                message_qt.FinishedSending(message_dict["time_received"])
+                message_qt.FinishedSending(message_dict["recv"])
                 return True
         return False
     
@@ -356,7 +357,7 @@ class ChatView(QScrollArea):
     def ScrollValueChanged(self, value: int) -> None:
         server = main_window.server_list.GetSelectedServerCache()
         self._last_scroll_value = value
-        if not self.messages or len(self.messages) == server.message_channels[self.current_channel]["message_count"]:
+        if not self.messages or len(self.messages) == server.message_channels[self.current_channel]["count"]:
             return
         
         # top/left end
@@ -369,7 +370,7 @@ class ChatView(QScrollArea):
         # bottom/right end
         elif value == self.verticalScrollBar().maximum():
             # request newer messages
-            if max(self.messages) < server.message_channels[self.current_channel]["message_count"] - 1:
+            if max(self.messages) < server.message_channels[self.current_channel]["count"] - 1:
                 server.RequestChannelMessageRange(self.current_channel, max(self.messages), "forward")
                 self._scroll_stay_in_place = True
 
@@ -489,6 +490,8 @@ class ChannelList(QListWidget):
         self.channel_name_list = []
 
     def SetChannels(self, room_id_list: list) -> None:
+        if not room_id_list:
+            print("hold on")
         self.clear()
         self.channel_name_list = room_id_list
         for room in room_id_list:
@@ -500,7 +503,7 @@ class ChannelList(QListWidget):
         main_window.chat_view.SetChannel(channel_name)
         server_cache = main_window.server_list.GetSelectedServerCache()
         server_cache.RequestChannelMessageRange(
-            channel_name, server_cache.message_channels[channel_name]["message_count"])
+            channel_name, server_cache.message_channels[channel_name]["count"])
         # self.sig_enter_room.emit(room_name)
         
     def GetChannelButton(self, channel_name: str) -> QListWidgetItem:
@@ -516,10 +519,48 @@ class ChannelList(QListWidget):
         room_id = self.channel_name_list[self.currentRow()]
         room = self.channel_name_list[room_id]
         return room_id, room
+    
+    
+class FTPFileExplorer(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setLayout(QVBoxLayout())
+        self.file_manager = QListWidget()
+        self.btn_upload = QPushButton("upload file")
+        self.btn_upload.clicked.connect(self.BrowseFileForUpload)
+        
+        self.layout().addWidget(self.file_manager)
+        self.layout().addWidget(self.btn_upload)
+        
+        self._file_dialog = QFileDialog()
+        self.current_server = None
+        
+    def show(self):
+        super().show()
+        self.UpdateFileList()
+        
+    def UpdateFileList(self):
+        server_cache = main_window.server_list.GetSelectedServerCache()
+        # mom = server_cache.ftp_con.retrlines('LIST')
+    
+        # get list of filenames on server
+        file_names = server_cache.ftp_con.nlst()
+
+        self.file_manager.clear()
+        for file_name in file_names:
+            self.file_manager.addItem(file_name)
+        
+    def BrowseFileForUpload(self):
+        filename, path_filter = self._file_dialog.getOpenFileName()
+        if filename:
+            server_cache = main_window.server_list.GetSelectedServerCache()
+            server_cache.UploadFile(filename)
+            self.UpdateFileList()
 
 
 class MainWindow(QWidget):
-    sig_callback = pyqtSignal(str, dict)
+    # sig_callback = pyqtSignal(str, dict)
+    sig_callback = pyqtSignal(Packet)
     sig_connection_callback = pyqtSignal(str, bool)
 
     def __init__(self):
@@ -538,6 +579,10 @@ class MainWindow(QWidget):
         self.server_list = ServerList()
         self.chat_view = ChatView(self)
         self.channel_list = ChannelList()
+        
+        self.ftp_explorer_button = QPushButton("FTP File Explorer")
+        self.ftp_explorer = FTPFileExplorer()
+        self.ftp_explorer_button.clicked.connect(self.ftp_explorer.show)
         
         server_address_dict = {}
         for server in self.client.server_list:
@@ -562,9 +607,13 @@ class MainWindow(QWidget):
 
         self.layout().addWidget(self.menu_bar)
         self.layout().addWidget(channel_layout_widget)
+        
+        channel_layout = QVBoxLayout()
+        channel_layout.addWidget(self.channel_list)
+        channel_layout.addWidget(self.ftp_explorer_button)
 
         channel_chat_layout.addWidget(self.server_list)
-        channel_chat_layout.addWidget(self.channel_list)
+        channel_chat_layout.addLayout(channel_layout)
         channel_chat_layout.addWidget(chat_layout_widget)
 
         self.setMinimumSize(QSize(100, 100))
@@ -585,9 +634,9 @@ class MainWindow(QWidget):
         self.callbacks[command] = function
         self.client.AddCallback(command, self.sig_callback.emit)
 
-    def HandleSignal(self, command: str, *args) -> None:
-        if command in self.callbacks:
-            self.callbacks[command](*args)
+    def HandleSignal(self, packet: Packet) -> None:
+        if packet.event in self.callbacks:
+            self.callbacks[packet.event](packet)
         
     def EmitServerConnectionChangeCallback(self, address: str, connected: bool) -> None:
         self.sig_connection_callback.emit(address, connected)
@@ -603,18 +652,17 @@ class MainWindow(QWidget):
                 self.channel_list.clear()
                 self.chat_view.Clear()
 
-    def ReceiveMessage(self, message) -> None:
+    def ReceiveMessage(self, message: Packet) -> None:
         server_cache = self.server_list.GetSelectedServerCache()
-        content = message["content"]
+        content = message.content
         channel = server_cache.message_channels[content["channel"]]
         message_tuple = [content["time"], content["name"], content["text"], content["file"]]
         if content["name"] == server_cache.public_uuid:
             if not self.chat_view.CheckForSendingMessage(content):
-                self.chat_view.AddMessage(channel["message_count"], message_tuple)
+                self.chat_view.AddMessage(channel["count"], message_tuple)
         else:
-            self.chat_view.AddMessage(channel["message_count"], message_tuple)
-        channel["message_count"] += 1
-        print("uhhh")
+            self.chat_view.AddMessage(channel["count"], message_tuple)
+        channel["count"] += 1
         
     
 # Back up the reference to the exceptionhook

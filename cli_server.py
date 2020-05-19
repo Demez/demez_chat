@@ -7,6 +7,8 @@ def ParseArgs():
     cmd_parser.add_argument("--name", "-n", default="default", help="Enter the server name")
     cmd_parser.add_argument("--ip", "-i", required=True, help="Enter the server address")
     cmd_parser.add_argument("--port", "-p", required=True, help="Enter the server port")
+    cmd_parser.add_argument("--ftp_ip", "-fi", help="Enter the ftp server ip")
+    cmd_parser.add_argument("--ftp_port", "-fp", required=True, help="Enter the ftp server port")
     cmd_parser.add_argument("--max", "-m", default=100, help="Max number of connections we can have")
     return cmd_parser.parse_args()
 
@@ -26,9 +28,12 @@ if __name__ == "__main__":
     ARGS = ParseArgs()
     # CreateDirectory("channels")
     # Thread(target=Server, args=()).start()
+    ftp_ip = ARGS.ftp_ip if ARGS.ftp_ip else ARGS.ip
     server = Server(
         ARGS.name,
         ARGS.ip,
         ARGS.port,
+        ftp_ip,
+        ARGS.ftp_port,
         ARGS.max)
 

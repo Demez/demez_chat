@@ -81,7 +81,7 @@ class UserConfig:
         
     def GetServerDKV(self, ip: str, port: int, name: str = "") -> dkv.DemezKeyValue:
         for server_dkv in self.dkv_input.GetItem("bookmarks").GetAllItems("server"):
-            if self._CheckServer(server_dkv, ip, port, name):
+            if self._CheckServer(server_dkv, ip, port):
                 return server_dkv
         
     def GetServerDKVBookmark(self, server: ServerBookmark) -> dkv.DemezKeyValue:
