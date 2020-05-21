@@ -1,11 +1,10 @@
 import os
 import json
 import socket
+import ftplib
 # from uuid import UUID
 from threading import Thread
 from time import sleep
-
-from ftplib import FTP, FTP_TLS
 
 from api2.shared import *
 from api2.client_user_config import UserConfig
@@ -37,10 +36,7 @@ class ServerCache(BaseClient):
         self.name = name
         self.user_tag = user_tag
         
-        self.ftp_port = ftp_port
-        self.ftp_ip = ip  # temp, use actual ftp ip later
-        self.ftp_address = f"{ip}:{ftp_port}"
-        self.ftp_con = None
+        self.ftp = FTPClient(self, ip, ftp_port)
         
         self._closing = False
         self._connected = False
@@ -146,15 +142,7 @@ class ServerCache(BaseClient):
             self.client.user_config.SetServerInfo(self.ip, self.port, self.private_uuid,
                                                   self.public_uuid, self.user_tag, self.name)
             
-            TimePrint("Connecting to FTP Server...")
-
-            # try connecting to the ftp server now i guess
-            # self.ftp_con = FTP(self.ftp_address, self.public_uuid, self.private_uuid)
-            self.ftp_con = FTP()
-            self.ftp_con.connect(self.ip, self.ftp_port)
-            self.ftp_con.login(self.public_uuid, self.private_uuid)
-            
-            TimePrint("ftp connection WORKED")
+            self.ftp.Connect()
 
         except (TimeoutError, socket.timeout, ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError):
             self._connected = False
@@ -184,6 +172,7 @@ class ServerCache(BaseClient):
                 elif self.client.listener.event_queue[self.address]:
                     event = self.client.listener.event_queue[self.address][0]
                     self.client.listener.event_queue[self.address].remove(event)
+                    TimePrint("Got server response")
                     return event
                 elif not self.listener.connected:
                     return None
@@ -259,11 +248,6 @@ class ServerCache(BaseClient):
         socket_.settimeout(1)  # might be too short of a timeout, idk
         socket_.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return socket_
-        
-    def UploadFile(self, file_path: str):
-        if file_path:
-            with open(file_path, "rb") as file_read:
-                self.ftp_con.storbinary(f"STOR {os.path.basename(file_path).replace(' ', '_')}", file_read)
     
     # =============================================================================================================
     # ALL EVENTS
@@ -276,8 +260,6 @@ class ServerCache(BaseClient):
 
     def ChannelListUpdate(self, channel_list: Packet) -> None:
         self.message_channels = channel_list.content
-        if channel_list.content == {}:
-            print("hold on")
         for message_channel in self.message_channels:
             self.message_channels[message_channel]["messages"] = {}
             
@@ -323,6 +305,81 @@ class ServerCache(BaseClient):
             return command_value
 
 
+# Wrapper class for FTP with a bit more functionality
+# Somewhat based off of os.path and teamspeak 3's ftp gui
+# https://www.serv-u.com/features/file-transfer-protocol-server-windows/commands
+class FTPClient(ftplib.FTP):
+    def __init__(self, parent: ServerCache, ip: str, port: int = 21):
+        super().__init__()
+        self.parent = parent
+        self.ip = ip
+        self.port = port
+        
+        self.file_list = {}
+    
+    def Connect(self):
+        TimePrint("Connecting to FTP Server...")
+        try:
+            super().connect(self.ip, self.port)
+            super().login(self.parent.public_uuid, self.parent.private_uuid)
+        except ftplib.error_perm as F:
+            PrintException(F, "FTP Permission Error: ")
+        except ftplib.all_errors as F:
+            PrintException(F, "FTP Exception: ")
+        
+        TimePrint("Connected To FTP Server")
+        
+        self.list_dir()
+        
+    def isfile(self, path: str) -> bool:
+        return self.exists(path) and self.file_list[path]["type"] == "file"
+        
+    def isdir(self, path: str) -> bool:
+        return self.exists(path) and self.file_list[path]["type"] == "dir"
+    
+    def get_size(self, path: str) -> int:
+        return 0 if not self.exists(path) else int(self.file_list[path]["size"])
+    
+    def exists(self, path: str) -> bool:
+        return path in self.file_list
+    
+    def stat(self, path: str) -> dict:
+        return self.file_list[path]
+    
+    def list_dir(self, path: str = "") -> dict:
+        if not self.file_list:
+            file_list_gen = self.mlsd()
+            for file_tuple in file_list_gen:
+                self.file_list[file_tuple[0]] = file_tuple[1]
+        return self.file_list
+        
+    def cwd(self, dirname: str):
+        super().cwd(dirname)
+        self.file_list = {}
+        self.list_dir()
+        
+    def rmd(self, dirname: str):
+        super().rmd(dirname)
+        name = os.path.basename(dirname)
+        if name in self.file_list:
+            self.file_list.pop(name)
+        
+    def download_files(self, output_dir: str, *files):
+        [self.download_file(file, output_dir) for file in files]
+        
+    def download_file(self, file_path: str, output_dir: str = ""):
+        # PLACEHOLDER
+        if not output_dir:
+            output_dir = "C:/Users/Demez/Downloads"
+        with open(output_dir + "/" + os.path.basename(file_path), "wb") as out_file:
+            self.retrbinary("RETR " + file_path, out_file.write, 8 * 1024)
+        
+    def upload_file(self, file_path: str, directory: str = ""):
+        if file_path and os.path.isfile(file_path):
+            with open(file_path, "rb") as file_read:
+                self.storbinary(f"STOR {os.path.basename(file_path).replace(' ', '_')}", file_read)
+
+
 class Client(Thread):
     def __init__(self) -> None:
         super().__init__()
@@ -341,7 +398,7 @@ class Client(Thread):
         for saved_server in self.user_config.bookmarks:
             self.server_list.append(ServerCache(
                 # PLACEHOLDER PORT NUMBER
-                self, saved_server.ip, saved_server.port, 1235, saved_server.name,
+                self, saved_server.ip, saved_server.port, saved_server.port + 1, saved_server.name,
                 saved_server.user_tag, saved_server.private_uuid, saved_server.public_uuid))
             
         self.listener.start()

@@ -1,4 +1,5 @@
 import sys
+import datetime
 
 from threading import Thread
 from urllib.parse import urlparse
@@ -468,6 +469,9 @@ class ServerList(QListWidget):
             
     def GetSelectedServerCache(self) -> ServerCache:
         return main_window.client.GetServerCache(self.GetSelectedServerAddress())
+    
+    def IsServerSelected(self) -> bool:
+        return self.currentRow() != -1
 
     @pyqtSlot()
     def ServerSelected(self) -> None:
@@ -487,24 +491,20 @@ class ChannelList(QListWidget):
         self.setFixedWidth(160)
         self.itemActivated.connect(self.ChannelSelected)
         self.itemClicked.connect(self.ChannelSelected)
-        self.channel_name_list = []
+        self.channel_name_list = {}
 
-    def SetChannels(self, room_id_list: list) -> None:
-        if not room_id_list:
-            print("hold on")
+    def SetChannels(self, channel_dict: dict) -> None:
         self.clear()
-        self.channel_name_list = room_id_list
-        for room in room_id_list:
+        self.channel_name_list = channel_dict
+        for room in channel_dict:
             self.addItem(QListWidgetItem(room))
 
     @pyqtSlot()
     def ChannelSelected(self, *ass) -> None:
         channel_name = self.GetSelectedChannelName()
         main_window.chat_view.SetChannel(channel_name)
-        server_cache = main_window.server_list.GetSelectedServerCache()
-        server_cache.RequestChannelMessageRange(
-            channel_name, server_cache.message_channels[channel_name]["count"])
-        # self.sig_enter_room.emit(room_name)
+        server = main_window.server_list.GetSelectedServerCache()
+        server.RequestChannelMessageRange(channel_name, server.message_channels[channel_name]["count"])
         
     def GetChannelButton(self, channel_name: str) -> QListWidgetItem:
         for i in range(self.count()):
@@ -521,41 +521,264 @@ class ChannelList(QListWidget):
         return room_id, room
     
     
+class FileListView(QTreeView):
+    def __init__(self, parent, file_list: QStandardItemModel):
+        super().__init__(parent)
+        self.setModel(file_list)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        self.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.header().resizeSection(1, 120)
+        self.header().resizeSection(2, 80)
+        self.header().resizeSection(3, 80)
+        
+        self.header().setMinimumSectionSize(40)
+        self.header().setStretchLastSection(False)
+        
+    def SetColumnProperties(self, index: int = 0):
+        while index < self.header().count():
+            # self.header().setSectionResizeMode(index, QHeaderView.ResizeToContents)
+            self.header().resizeSection(index, 200)
+            index += 1
+        
+    def GetSelectedFiles(self) -> list:
+        file_list = [item.data() for item in self.selectedIndexes() if item.column() == 0]
+        return file_list
+    
+    def EnterEvent(self):
+        selected_files = self.selectedIndexes()
+        if not selected_files:
+            return
+    
+        file_list = self.GetSelectedFiles()
+    
+        server = GET_SERVER_CACHE()
+        if len(file_list) == 1:
+            file_path = file_list[0]
+            
+            if server.ftp.isfile(file_path):
+                server.ftp.download_file(file_path, self.parent().dl_folder.text())
+            elif server.ftp.isdir(file_path):
+                server.ftp.cwd(file_path)
+                self.parent().SetDir("/" + file_path)
+        else:
+            for file_path in file_list:
+                if server.ftp.isfile(file_path):
+                    server.ftp.download_file(file_path, self.parent().dl_folder.text())
+    
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        super().keyPressEvent(event)
+        if event.key() in {Qt.Key_Enter, Qt.Key_Return}:
+            self.EnterEvent()
+        
+    def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:
+        super().mouseDoubleClickEvent(e)
+        self.EnterEvent()
+
+
+class FileList(QStandardItemModel):
+    def __init__(self):
+        super().__init__()
+        self.setColumnCount(3)
+        self.setHorizontalHeaderItem(0, QStandardItem("Name"))
+        self.setHorizontalHeaderItem(1, QStandardItem("Date modified"))
+        self.setHorizontalHeaderItem(2, QStandardItem("Type"))
+        self.setHorizontalHeaderItem(3, QStandardItem("Size"))
+        ass = self.horizontalHeaderItem(0)
+    
+    def reset(self) -> None:
+        self.removeRows(0, self.rowCount())
+    
+    def remove_item(self, file_path: str) -> None:
+        pass
+    
+    def add_item(self, file_path: str, file_info: dict) -> None:
+        # self._add_item_row(self.row, file_path, check_state, bg_color)
+        self._add_item_row(self.rowCount(), file_path, file_info)
+    
+    def insert_item(self, row_index: int, file_path: str, file_info: dict) -> None:
+        self.insertRow(row_index)
+        self._add_item_row(row_index, file_path, file_info)
+    
+    def _add_item_row(self, row: int, file_path: str, file_info: dict) -> None:
+        item_file_path = QStandardItem(file_path)
+        
+        ftp = GET_SERVER_CACHE().ftp
+        if ftp.isdir(file_path):
+            item_type = QStandardItem("Folder")
+            size = ""
+        else:
+            item_type = QStandardItem(os.path.splitext(file_path)[1])
+            size = str(bytes_to_megabytes(file_info["size"])) + " MB"
+        
+        # 20200516165223
+        # 2020/05/16 - 16:52:23
+        date_mod = datetime.datetime.strptime(file_info["modify"], "%Y%m%d%H%M%S")
+        item_date_mod = QStandardItem(str(date_mod))
+        
+        item_size = QStandardItem(size)
+        
+        item_file_path.setEditable(False)
+        item_date_mod.setEditable(False)
+        item_type.setEditable(False)
+        item_size.setEditable(False)
+        
+        self.setItem(row, 0, item_file_path)
+        self.setItem(row, 1, item_date_mod)
+        self.setItem(row, 2, item_type)
+        self.setItem(row, 3, item_size)
+    
+    def _get_iter(self) -> iter:
+        return range(0, self.rowCount())
+    
+    def get_file_item(self, file_path: str) -> QStandardItem:
+        for file_index in self._get_iter():
+            item = self.item(file_index)
+            if item and item.text() == file_path:
+                return item
+    
+    def get_file_row(self, file_path: str) -> int:
+        return self.get_file_item(file_path).row()
+
+
+def get_file_size_str(file_path: str) -> str:
+    if os.path.isfile(file_path):
+        return str(bytes_to_megabytes(os.path.getsize(file_path))) + " MB"
+    else:
+        return "0 MB"
+
+
+def bytes_to_megabytes(bytes_: int) -> float:
+    # use 1024 multiples for windows, 1000 for everything else
+    return round(int(bytes_) * 0.00000095367432, 3) if os.name == "nt" else round(int(bytes_) * 0.000001, 3)
+
+
+def get_date_modified(file_path: str) -> float:
+    if os.path.isfile(file_path):
+        if os.name == "nt":
+            return os.path.getmtime(file_path)
+        else:
+            return os.stat(file_path).st_mtime
+    return -1.0
+
+
+def get_date_modified_datetime(file_path: str) -> datetime.datetime:
+    unix_time = get_date_modified(file_path)
+    mod_time = datetime.datetime.fromtimestamp(unix_time)
+    return mod_time
+    
+    
+# based off of teamspeak 3's ftp gui
 class FTPFileExplorer(QWidget):
     def __init__(self):
         super().__init__()
         self.setLayout(QVBoxLayout())
-        self.file_manager = QListWidget()
-        self.btn_upload = QPushButton("upload file")
-        self.btn_upload.clicked.connect(self.BrowseFileForUpload)
+        self.setWindowTitle("FTP File Explorer")
+        # self.file_manager = QListWidget()
         
-        self.layout().addWidget(self.file_manager)
-        self.layout().addWidget(self.btn_upload)
+        self.header = FileExplorerHeader(self)
+        
+        # download folder
+        # PLACEHOLDER: hardcoded
+        self.dl_folder = QLineEdit("C:/Users/Demez/Downloads")
+        
+        self.ui_file_list = FileList()
+        self.ui_file_list_view = FileListView(self, self.ui_file_list)
+
+        self.layout().addWidget(self.header)
+        self.layout().addWidget(self.ui_file_list_view)
+        self.layout().addWidget(self.dl_folder)
         
         self._file_dialog = QFileDialog()
         self.current_server = None
         
     def show(self):
         super().show()
+        self.raise_()
         self.UpdateFileList()
         
+    def ClearFiles(self):
+        self.ui_file_list.reset()
+        
+    def SetDir(self, directory: str):
+        self.UpdateFileList()
+        self.header.txt_path.setText(directory)
+        
+    def DeleteFile(self, path: str):
+        server = GET_SERVER_CACHE()
+        server.ftp.rmd(path)
+        pass
+        
+    def DeleteSelected(self):
+        [self.DeleteFile(file) for file in self.ui_file_list_view.GetSelectedFiles()]
+        
+    def ChangeDir(self, directory: str):
+        server = GET_SERVER_CACHE()
+        base_path, folder_name = os.path.split(directory)
+        if server.ftp.isdir(folder_name) or directory in {"/", ""}:
+            server.ftp.cwd(directory)
+            if not base_path.endswith("/"):
+                base_path += "/"
+            self.SetDir(base_path + folder_name)
+        
     def UpdateFileList(self):
-        server_cache = main_window.server_list.GetSelectedServerCache()
-        # mom = server_cache.ftp_con.retrlines('LIST')
+        server_cache = GET_SERVER_CACHE()
     
         # get list of filenames on server
-        file_names = server_cache.ftp_con.nlst()
+        server_cache.ftp.list_dir()
 
-        self.file_manager.clear()
-        for file_name in file_names:
-            self.file_manager.addItem(file_name)
+        self.ClearFiles()
+        for file_path, file_stat in server_cache.ftp.file_list.items():
+            self.ui_file_list.add_item(file_path, file_stat)
         
     def BrowseFileForUpload(self):
         filename, path_filter = self._file_dialog.getOpenFileName()
         if filename:
-            server_cache = main_window.server_list.GetSelectedServerCache()
-            server_cache.UploadFile(filename)
+            server_cache = GET_SERVER_CACHE()
+            server_cache.ftp.upload_file(filename)
             self.UpdateFileList()
+    
+    
+class FileExplorerHeader(QWidget):
+    def __init__(self, file_explorer: FTPFileExplorer):
+        super().__init__(file_explorer)
+        self.parent = file_explorer
+        self.setLayout(QHBoxLayout())
+        self.layout().setContentsMargins(0, 0, 0, 0)
+        
+        # self.btn_new_dir = QPushButton("new dir")
+        self.btn_del = QPushButton("del")
+        self.btn_upload = QPushButton("upload")
+        self.btn_up = QPushButton("up")
+        self.btn_enter = QPushButton("enter")  # enter directory specified below
+        self.txt_path = QLineEdit("/")  # current directory
+        
+        self.btn_upload.clicked.connect(self.parent.BrowseFileForUpload)
+        self.btn_up.clicked.connect(self.BtnPressLeaveFolder)
+        self.btn_enter.clicked.connect(self.BtnPressEnter)
+
+        self.btn_del.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_upload.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_up.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_enter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        
+        # self.layout().addWidget(self.btn_new_dir)
+        self.layout().addWidget(self.btn_del)
+        self.layout().addWidget(self.btn_upload)
+        self.layout().addWidget(self.btn_up)
+        self.layout().addWidget(self.txt_path)
+        self.layout().addWidget(self.btn_enter)
+        
+    def BtnPressDelete(self):
+        self.parent.DeleteFile(self.txt_path.text())
+        
+    def BtnPressLeaveFolder(self):
+        folder = self.txt_path.text()
+        if folder != "/":
+            self.parent.ChangeDir(os.path.split(folder)[0])
+        
+    def BtnPressEnter(self):
+        self.parent.ChangeDir(self.txt_path.text())
 
 
 class MainWindow(QWidget):
@@ -570,7 +793,7 @@ class MainWindow(QWidget):
         self.client = Client()
         
         self.sig_connection_callback.connect(self.RunServerConnectionChangeCallback)
-        self.client.SetServerConnectionChangeCallback(self.EmitServerConnectionChangeCallback)
+        self.client.SetServerConnectionChangeCallback(self.sig_connection_callback.emit)
         
         self.client.start()
         self.bookmarks_manager = BookmarkManager(self)
@@ -627,6 +850,7 @@ class MainWindow(QWidget):
 
         self.AddCallback("channel_messages", self.chat_view.MessageUpdate)
         self.AddCallback("receive_message", self.ReceiveMessage)
+        self.AddCallback("channel_list", self.Callback_SetChannels)
 
         self.show()
 
@@ -637,9 +861,6 @@ class MainWindow(QWidget):
     def HandleSignal(self, packet: Packet) -> None:
         if packet.event in self.callbacks:
             self.callbacks[packet.event](packet)
-        
-    def EmitServerConnectionChangeCallback(self, address: str, connected: bool) -> None:
-        self.sig_connection_callback.emit(address, connected)
         
     def RunServerConnectionChangeCallback(self, address: str, connected: bool) -> None:
         if connected:
@@ -664,6 +885,10 @@ class MainWindow(QWidget):
             self.chat_view.AddMessage(channel["count"], message_tuple)
         channel["count"] += 1
         
+    def Callback_SetChannels(self, channel_list: Packet):
+        if self.server_list.IsServerSelected():
+            self.channel_list.SetChannels(channel_list.content)
+        
     
 # Back up the reference to the exceptionhook
 sys._excepthook = sys.excepthook
@@ -685,6 +910,10 @@ if __name__ == "__main__":
     APP = QApplication(sys.argv)
     APP.setDesktopSettingsAware(True)
     main_window = MainWindow()
+    
+    def GET_SERVER_CACHE():
+        return main_window.server_list.GetSelectedServerCache()
+    
     try:
         sys.exit(APP.exec_())
     except Exception as F:
