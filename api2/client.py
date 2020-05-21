@@ -126,10 +126,9 @@ class ServerCache(BaseClient):
                 return
             
             # wait for the server to give us a tag
-            if self.user_tag is None:
-                response = self.WaitForServerResponse()
-                if response:
-                    self.HandleEvent(response)
+            while self.user_tag is None:
+                TimePrint("Waiting for user tag from server")
+                sleep(0.1)
             
             self.RequestFullUpdateWait()
             self._connected = True
