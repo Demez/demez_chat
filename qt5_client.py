@@ -6,12 +6,19 @@ from urllib.parse import urlparse
 from qt5_bookmark_manager import BookmarkManager
 from qt5_client_embed import *
 from api2.client import Client, ServerCache
-from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime, Packet
+from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime, Packet, PrintWarning
+from api2.video_player import VideoPlayer
+
+import cProfile, pstats, io
+from pstats import SortKey
+from time import sleep, perf_counter
 
 # for pycharm, install pyqt5-stubs, so you don't get 10000 errors for no reason
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
+from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
+from PyQt5.QtMultimediaWidgets import QVideoWidget
 
 # also need to install PyQtWebEngine
 # for linux, do apt-get install python3-pyqt5.qtwebengine
@@ -45,17 +52,61 @@ def IsValidURL(url: str) -> bool:
         return False
 
 
+class Help(QTimer):
+    def __init__(self):
+        super().__init__()
+        self.prof = cProfile.Profile()
+        self.prof.enable()
+        self.exiting = False
+        self.timeout.connect(self.help)
+        self.last_update = 0
+        
+    def help(self):
+        if self.last_update != 0:
+            diff = round(perf_counter() - self.last_update, 6)
+            # print(f"TIME: {diff}")
+            if diff > 5.0:
+                print("bruh")
+                print(self.prof.print_stats())
+    
+        self.last_update = perf_counter()
+    
+    
+class TextBox(QTextEdit):
+    sig_send = pyqtSignal()
+    
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        # self.text_input.setMaximumHeight(200)
+        
+    def insertFromMimeData(self, source: QMimeData):
+        self.insertPlainText(source.text())
+    
+    def keyPressEvent(self, event: QKeyEvent):
+        key = event.key()
+        if Qt.ShiftModifier != event.modifiers():
+            if key in {Qt.Key_Return, Qt.Key_Enter}:
+                self.sig_send.emit()
+            else:
+                super().keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
+    
+
 class ChatBox(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.setLayout(QHBoxLayout())
         self.layout().setContentsMargins(QMargins(0, 0, 0, 0))
+        self.setFixedHeight(64)
+        # self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
 
         # TODO: use something better than QLineEdit, for multi-line stuff
         #  and maybe even support markdown in the future
-        self.text_input = QLineEdit()
-        self.text_input.setReadOnly(True)
-        self.text_input.returnPressed.connect(self.SendMessage)
+        self.text_input = TextBox(self)
+        self.text_input.sig_send.connect(self.SendMessage)
+        # self.text_input.returnPressed.connect(self.SendMessage)
 
         # send_button = QPushButton("send")
         # send_button.pressed.connect(self.SendMessage)
@@ -71,12 +122,11 @@ class ChatBox(QWidget):
 
     @pyqtSlot()
     def SendMessage(self):
-        if self.text_input.text():
+        if self.text_input.toPlainText():
             server_cache = main_window.server_list.GetSelectedServerCache()
-            message_dict = server_cache.SendMessage(main_window.chat_view.current_channel, self.text_input.text())
+            message_dict = server_cache.SendMessage(main_window.chat_view.current_channel, self.text_input.toPlainText())
             main_window.chat_view.SendMessage(message_dict)
             self.text_input.setText("")
-            # TODO: have ChatView scroll down to bottom
 
 
 class MessageView(QWidget):
@@ -103,7 +153,7 @@ class MessageView(QWidget):
             self.user = server.member_list[sender]
             self.name = QLabel(self.user[0])
         except KeyError:
-            TimePrint("WARNING: member doesn't exist? " + sender)
+            PrintWarning("WARNING: member doesn't exist? " + sender)
             self.user = sender
             self.name = QLabel(sender)
         
@@ -120,12 +170,11 @@ class MessageView(QWidget):
         
         self.name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.time.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        # self.text.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        self.text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         # self.text.setWordWrap(True)  # why does this not work correctly
 
         self.user_image_layout.addWidget(self.user_image)
-        # self.user_image_layout.setContentsMargins(QMargins(0, 0, 0, 0))
         self.user_image_layout.addStretch(1)
 
         self.layout().addLayout(self.user_image_layout)
@@ -158,23 +207,38 @@ class MessageView(QWidget):
         self.sig_embed.connect(self.EmbedDownloadCallback)
 
         self.embed_list = []
-        self.url_list = self.CheckForURL()
+        self.url_dict = self.CheckForURL()
+        
         # TODO: limit the max download thread count
-        for url in self.url_list:
-            bad_download_thread = Thread(target=DownloadURL, args=(url, self.sig_embed.emit))
-            bad_download_thread.start()
+        if self.url_dict:
+            self.text.setOpenExternalLinks(True)
+            for url in self.url_dict:
+                text = self.text.text()
+                text = text.replace(url, f"<a href=\"{url}\">{url}</a>")
+                self.text.setText(text)
+                if self.url_dict[url] == EmbedTypes.IMAGE:
+                    bad_download_thread = Thread(target=DownloadURL, args=(url, self.sig_embed.emit))
+                    bad_download_thread.start()
+                    
+                elif self.url_dict[url] == EmbedTypes.VIDEO:
+                    video_embed = VideoPlayer(self)
+                    video_embed.set_video_path(url)
+                    self.embed_list.append(video_embed)
+                    self.message_layout.addWidget(video_embed)
 
     def FinishedSending(self, new_time=None):
         self.time.setText(UnixToDateTime(new_time).strftime("%Y-%m-%d - %H:%M:%S"))
         self.text.setStyleSheet("")
 
-    def CheckForURL(self) -> list:
-        url_list = []
-        text_split = self.text.text().split(" ")
-        for string in text_split:
-            if IsValidURL(string):
-                url_list.append(string)
-        return url_list
+    def CheckForURL(self) -> dict:
+        url_dict = {}
+        text_split_lines = self.text.text().splitlines()
+        for text_line in text_split_lines:
+            text_split = text_line.split(" ")
+            for string in text_split:
+                if IsValidURL(string):
+                    url_dict[string] = GetEmbedTypeExt(string)
+        return url_dict
 
     # TODO: look at QMovie for embeds here, or use libmpv, good luck with that in python though lol
     def EmbedDownloadCallback(self, url: str, opened_url: HTTPResponse) -> None:
@@ -238,14 +302,38 @@ class ChatView(QScrollArea):
     def SetChannel(self, channel_name: str) -> None:
         self.current_channel = channel_name
         self.messages.clear()
+        self.RemoveEmbeds()
         RemoveWidgets(self.GetLayout())
         main_window.chat_box.Enable()
         self._last_scroll_value = -1
         self._last_scroll_max = -1
         self._scroll_stay_in_place = False
         
+    # This is required thanks to mpv, or maybe just python, not functioning the way i expect
+    # if you play a video with mpv, and then switch to a different channel, qt just freezes,
+    # but not in the not responding way, just you can't interact with anything
+    # i noticed that the mpv deconstructor is just not being called with del,
+    # so i just copy the 2 lines in it's deconstructor, and guess what? that solves the problem
+    # so that means i just have to manually deconstruct it just to get it to function correctly lmao
+    def RemoveEmbeds(self):
+        try:
+            for i in reversed(range(self.GetLayout().count())):
+                widget = self.GetLayout().itemAt(i).widget()
+                if type(widget) == MessageView:
+                    for embed in widget.embed_list:
+                        if type(embed) == VideoPlayer:
+                            embed.player.quit()
+                            if embed.player.handle:
+                                embed.player.terminate()
+                            del embed.player
+                        del embed
+                widget.setParent(None)
+        except AttributeError:
+            return
+        
     def Clear(self):
         self.messages.clear()
+        self.RemoveEmbeds()
         RemoveWidgets(self.GetLayout())
         main_window.chat_box.Disable()
         
@@ -356,6 +444,9 @@ class ChatView(QScrollArea):
     #  need to be able to prepend messages (that QModel thing?)
     #  also need to check if we already have the messages, just grabs the message again for some reason
     def ScrollValueChanged(self, value: int) -> None:
+        if not main_window.server_list.IsServerSelected():
+            return
+        
         server = main_window.server_list.GetSelectedServerCache()
         self._last_scroll_value = value
         if not self.messages or len(self.messages) == server.message_channels[self.current_channel]["count"]:
@@ -576,15 +667,15 @@ class FileListView(QTreeView):
         self.EnterEvent()
 
 
-class FileList(QStandardItemModel):
-    def __init__(self):
+class BaseFileList(QStandardItemModel):
+    def __init__(self, *names):
         super().__init__()
-        self.setColumnCount(3)
-        self.setHorizontalHeaderItem(0, QStandardItem("Name"))
-        self.setHorizontalHeaderItem(1, QStandardItem("Date modified"))
-        self.setHorizontalHeaderItem(2, QStandardItem("Type"))
-        self.setHorizontalHeaderItem(3, QStandardItem("Size"))
-        ass = self.horizontalHeaderItem(0)
+        self.setColumnCount(len(names))
+        
+        index = 0
+        while index < len(names):
+            self.setHorizontalHeaderItem(index, QStandardItem(names[index]))
+            index += 1
     
     def reset(self) -> None:
         self.removeRows(0, self.rowCount())
@@ -593,7 +684,6 @@ class FileList(QStandardItemModel):
         pass
     
     def add_item(self, file_path: str, file_info: dict) -> None:
-        # self._add_item_row(self.row, file_path, check_state, bg_color)
         self._add_item_row(self.rowCount(), file_path, file_info)
     
     def insert_item(self, row_index: int, file_path: str, file_info: dict) -> None:
@@ -601,32 +691,12 @@ class FileList(QStandardItemModel):
         self._add_item_row(row_index, file_path, file_info)
     
     def _add_item_row(self, row: int, file_path: str, file_info: dict) -> None:
-        item_file_path = QStandardItem(file_path)
+        pass
         
-        ftp = GET_SERVER_CACHE().ftp
-        if ftp.isdir(file_path):
-            item_type = QStandardItem("Folder")
-            size = ""
-        else:
-            item_type = QStandardItem(os.path.splitext(file_path)[1])
-            size = str(bytes_to_megabytes(file_info["size"])) + " MB"
-        
-        # 20200516165223
-        # 2020/05/16 - 16:52:23
-        date_mod = datetime.datetime.strptime(file_info["modify"], "%Y%m%d%H%M%S")
-        item_date_mod = QStandardItem(str(date_mod))
-        
-        item_size = QStandardItem(size)
-        
-        item_file_path.setEditable(False)
-        item_date_mod.setEditable(False)
-        item_type.setEditable(False)
-        item_size.setEditable(False)
-        
-        self.setItem(row, 0, item_file_path)
-        self.setItem(row, 1, item_date_mod)
-        self.setItem(row, 2, item_type)
-        self.setItem(row, 3, item_size)
+    def _add_items_to_row(self, row, *items):
+        for index, item in enumerate(items):
+            item.setEditable(False)
+            self.setItem(row, index, item)
     
     def _get_iter(self) -> iter:
         return range(0, self.rowCount())
@@ -639,6 +709,31 @@ class FileList(QStandardItemModel):
     
     def get_file_row(self, file_path: str) -> int:
         return self.get_file_item(file_path).row()
+
+
+class FileList(BaseFileList):
+    def __init__(self):
+        super().__init__("Name", "Date modified", "Type", "Size")
+        
+    def _add_item_row(self, row: int, file_path: str, file_info: dict) -> None:
+        item_file_path = QStandardItem(file_path)
+    
+        ftp = GET_SERVER_CACHE().ftp
+        if ftp.isdir(file_path):
+            item_type = QStandardItem("Folder")
+            size = ""
+        else:
+            item_type = QStandardItem(os.path.splitext(file_path)[1])
+            size = str(bytes_to_megabytes(file_info["size"])) + " MB"
+    
+        # 20200516165223
+        # 2020/05/16 - 16:52:23
+        date_mod = datetime.datetime.strptime(file_info["modify"], "%Y%m%d%H%M%S")
+        item_date_mod = QStandardItem(str(date_mod))
+    
+        item_size = QStandardItem(size)
+    
+        self._add_items_to_row(row, item_file_path, item_date_mod, item_type, item_size)
 
 
 def get_file_size_str(file_path: str) -> str:
@@ -684,10 +779,13 @@ class FTPFileExplorer(QWidget):
         
         self.ui_file_list = FileList()
         self.ui_file_list_view = FileListView(self, self.ui_file_list)
+        
+        self.ui_file_transfer = FileTransferProgress(self)
 
         self.layout().addWidget(self.header)
         self.layout().addWidget(self.ui_file_list_view)
         self.layout().addWidget(self.dl_folder)
+        self.layout().addWidget(self.ui_file_transfer)
         
         self._file_dialog = QFileDialog()
         self.current_server = None
@@ -699,6 +797,10 @@ class FTPFileExplorer(QWidget):
         
     def ClearFiles(self):
         self.ui_file_list.reset()
+        
+    def DownloadFile(self, file_path):
+        server = GET_SERVER_CACHE()
+        server.ftp.download_file(file_path, self.dl_folder.text())
         
     def SetDir(self, directory: str):
         self.UpdateFileList()
@@ -779,6 +881,47 @@ class FileExplorerHeader(QWidget):
         
     def BtnPressEnter(self):
         self.parent.ChangeDir(self.txt_path.text())
+        
+        
+class FileTransferProgress(QWidget):
+    def __init__(self, parent: FTPFileExplorer):
+        super().__init__(parent)
+        self.parent = parent
+        self.file_list = FileTransferList()
+        
+    def DownloadFile(self, file_path: str, output_dir: str = ""):
+        server = GET_SERVER_CACHE()
+        file_stat = server.ftp.file_list["file_path"]
+
+        output_file = output_dir + "/" + os.path.basename(file_path)
+        
+        with open(output_dir + "/" + os.path.basename(file_path), "wb") as out_file:
+            server.ftp.retrbinary("RETR " + file_path, out_file.write, 8 * 1024)
+
+
+class FileTransferList(BaseFileList):
+    def __init__(self):
+        super().__init__("Name", "Size", "Progress", "Progress Bar")
+
+    def _add_item_row(self, row: int, file_path: str, file_info: dict) -> None:
+        item_file_path = QStandardItem(file_path)
+    
+        ftp = GET_SERVER_CACHE().ftp
+        if ftp.isdir(file_path):
+            item_type = QStandardItem("Folder")
+            size = ""
+        else:
+            item_type = QStandardItem(os.path.splitext(file_path)[1])
+            size = str(bytes_to_megabytes(file_info["size"])) + " MB"
+    
+        # 20200516165223
+        # 2020/05/16 - 16:52:23
+        date_mod = datetime.datetime.strptime(file_info["modify"], "%Y%m%d%H%M%S")
+        item_date_mod = QStandardItem(str(date_mod))
+    
+        item_size = QStandardItem(size)
+    
+        self._add_items_to_row(row, item_file_path, item_date_mod, item_type, item_size)
 
 
 class MainWindow(QWidget):
@@ -788,6 +931,8 @@ class MainWindow(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.prof = Help()
+        
         self.setLayout(QVBoxLayout())
         self.setWindowTitle("Demez Chat")
         self.client = Client()
@@ -797,7 +942,7 @@ class MainWindow(QWidget):
         
         self.client.start()
         self.bookmarks_manager = BookmarkManager(self)
-        self.menu_bar = MenuBar(self)
+        # self.menu_bar = MenuBar(self)
 
         self.server_list = ServerList()
         self.chat_view = ChatView(self)
@@ -813,6 +958,7 @@ class MainWindow(QWidget):
         
         self.server_list.SetServers(server_address_dict)
 
+        # channel_chat_splitter = QSplitter()
         channel_chat_layout = QHBoxLayout()
         channel_layout_widget = QWidget()
         channel_layout_widget.setLayout(channel_chat_layout)
@@ -821,14 +967,22 @@ class MainWindow(QWidget):
         self.chat_box.show()
 
         chat_layout = QVBoxLayout()
+        # chat_layout = QSplitter()
         chat_layout.addWidget(self.chat_view)
         chat_layout.addWidget(self.chat_box)
-        chat_layout.setContentsMargins(QMargins(0, 0, 0, 0))
+        # chat_layout.setOrientation(Qt.Vertical)
+        # chat_layout.setCollapsible(0, False)
+        # chat_layout.setCollapsible(1, False)
+        # chat_layout.setStretchFactor(0, 2)
+        # chat_layout.setStretchFactor(1, 0)
+        # chat_layout.setMinimumSize(0, 160)
+        # chat_layout.setContentsMargins(QMargins(0, 0, 0, 0))
 
-        chat_layout_widget = QWidget()
-        chat_layout_widget.setLayout(chat_layout)
+        # chat_layout_widget = QWidget()
+        # chat_layout_widget.setLayout(chat_layout)
 
-        self.layout().addWidget(self.menu_bar)
+        # self.layout().addWidget(self.menu_bar)
+        # self.layout().addLayout(channel_chat_layout)
         self.layout().addWidget(channel_layout_widget)
         
         channel_layout = QVBoxLayout()
@@ -837,7 +991,8 @@ class MainWindow(QWidget):
 
         channel_chat_layout.addWidget(self.server_list)
         channel_chat_layout.addLayout(channel_layout)
-        channel_chat_layout.addWidget(chat_layout_widget)
+        channel_chat_layout.addLayout(chat_layout)
+        # channel_chat_layout.addWidget(chat_layout)
 
         self.setMinimumSize(QSize(100, 100))
         self.resize(800, 600)
@@ -910,6 +1065,7 @@ if __name__ == "__main__":
     APP = QApplication(sys.argv)
     APP.setDesktopSettingsAware(True)
     main_window = MainWindow()
+    main_window.prof.start()
     
     def GET_SERVER_CACHE():
         return main_window.server_list.GetSelectedServerCache()

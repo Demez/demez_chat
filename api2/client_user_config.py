@@ -1,28 +1,50 @@
 from dkv import demez_key_values as dkv
-# import os
+import os
 from uuid import UUID
+from api2.shared import PrintError, PrintWarning
 
 
 USER_CONFIG_PATH = "user_config.dkv"
 DEFAULT_NAME = "Default Name"
 DEFAULT_PFP_PATH = "doge.png"
+ROOT_DIR = "C:/" if os.name == "nt" else "/"
 
 
 class ServerBookmark:
-    def __init__(self, ip: str, port: int, name: str = "", private_uuid: str = None,
-                 public_uuid: str = None, user_tag: int = None):
+    def __init__(self, ip: str, port: int, ftp_port: int = -1, name: str = "", private_uuid: str = None,
+                 public_uuid: str = None, user_tag: int = None, disabled: int = 0):
         self.ip = ip
-        self.port = port
+
+        err_name = ip if ip else name if name else ""
+        
+        try:
+            self.port = int(port)
+        except TypeError:
+            PrintError(f"Port value for server \"{err_name}\" needs to be an integer")
+            quit(1)
+        
+        try:
+            if ftp_port == -1:
+                ftp_port = port + 1
+            self.ftp_port = int(ftp_port)
+        except TypeError:
+            PrintError(f"FTP Port value for server \"{err_name}\" needs to be an integer")
+            quit(1)
+            
         self.name = name
         self.private_uuid = private_uuid
         self.public_uuid = public_uuid
-        self.user_tag = user_tag
+        self.disabled = disabled
+        self.user_tag = user_tag if type(user_tag) == int else None
+        
+        self.valid = bool(self.ip and self.port)
 
 
 class UserInfo:
-    def __init__(self, name: str = DEFAULT_NAME, picture: str = DEFAULT_PFP_PATH):
+    def __init__(self, name: str = DEFAULT_NAME, picture: str = DEFAULT_PFP_PATH, download: str = ROOT_DIR):
         self.name = name
         self.picture = picture
+        self.download = download
 
 
 class UserConfig:
@@ -39,18 +61,31 @@ class UserConfig:
         if bookmarks_dkv:
             for server in bookmarks_dkv.GetAllItems("server"):
                 server_obj = ServerBookmark(
-                    server.GetItemValue("ip"), server.GetItemIntValue("port"), server.GetItemValue("name"),
-                    server.GetItemValue("private_uuid"), server.GetItemValue("public_uuid"))
-                user_tag = server.GetItemIntValue("user_tag")
-                if type(user_tag) == int:
-                    server_obj.user_tag = user_tag
-                self.bookmarks.append(server_obj)
+                    server.GetItemValue("ip"),
+                    server.GetItemIntValue("port"),
+                    server.GetItemIntValue("ftp_port"),
+                    server.GetItemValue("name"),
+                    server.GetItemValue("private_uuid"),
+                    server.GetItemValue("public_uuid"),
+                    server.GetItemIntValue("user_tag"),
+                    server.GetItemIntValue("disabled")
+                )
+                if server_obj.valid:
+                    if not server_obj.disabled:
+                        self.bookmarks.append(server_obj)
+                else:
+                    name = server_obj.ip if server_obj.ip else server_obj.name
+                    PrintWarning(f"Server \"{name}\" is not valid!")
         else:
             self.dkv_input.AddItem("bookmarks", [])
                 
         user = self.dkv_input.GetItem("user")
         if user:
-            self.user = UserInfo(user.GetItemValue("name"), user.GetItemValue("picture"))
+            self.user = UserInfo(
+                user.GetItemValue("name"),
+                user.GetItemValue("picture"),
+                user.GetItemValue("download")
+            )
         else:
             user = self.dkv_input.AddItem("user", [])
             self.user = UserInfo()

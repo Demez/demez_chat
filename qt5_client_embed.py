@@ -7,6 +7,7 @@ from enum import Enum, auto
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
+from api2.video_player import VideoPlayer
 
 
 class EmbedTypes(Enum):
@@ -65,13 +66,26 @@ def DownloadURL(url: str, bad_callback: classmethod):
         return None
     # data = response.read()  # The data u need
     # return response
-    bad_callback(url, response)
-
-
-class ImageEmbed(QLabel):
-    def __init__(self, parent: QWidget, path: str, response: HTTPResponse):
+    if bad_callback:
+        bad_callback(url, response)
+    
+    
+class BaseEmbed(QLabel):
+    def __init__(self, parent: QWidget, path: str):
         super().__init__(parent)
         self.path = path
+    
+    
+class VideoEmbed(BaseEmbed):
+    def __init__(self, parent: QWidget, path: str):
+        super().__init__(parent, path)
+        self.UpdateImageSize(600, 800)
+
+
+class ImageEmbed(BaseEmbed):
+    def __init__(self, parent: QWidget, path: str, response: HTTPResponse):
+        super().__init__(parent, path)
+        response = response  # useless
         data = response.read()
         self.image_pixmap = QPixmap()
         self.image_pixmap.loadFromData(data)

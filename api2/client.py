@@ -38,6 +38,7 @@ class ServerCache(BaseClient):
         
         self.ftp = FTPClient(self, ip, ftp_port)
         
+        self.disabled = False
         self._closing = False
         self._connected = False
         self._uuid_verified = False
@@ -315,7 +316,10 @@ class FTPClient(ftplib.FTP):
         self.port = port
         
         self.file_list = {}
-    
+        
+        self.uploader = FTPUploader(self)
+        self.downloader = FTPDownloader(self)
+        
     def Connect(self):
         TimePrint("Connecting to FTP Server...")
         try:
@@ -329,6 +333,9 @@ class FTPClient(ftplib.FTP):
         TimePrint("Connected To FTP Server")
         
         self.list_dir()
+
+        self.uploader.start()
+        self.downloader.start()
         
     def isfile(self, path: str) -> bool:
         return self.exists(path) and self.file_list[path]["type"] == "file"
@@ -366,17 +373,83 @@ class FTPClient(ftplib.FTP):
     def download_files(self, output_dir: str, *files):
         [self.download_file(file, output_dir) for file in files]
         
+    def upload_files(self, *files):
+        self.uploader.queue.extend(files)
+        
     def download_file(self, file_path: str, output_dir: str = ""):
-        # PLACEHOLDER
-        if not output_dir:
-            output_dir = "C:/Users/Demez/Downloads"
-        with open(output_dir + "/" + os.path.basename(file_path), "wb") as out_file:
-            self.retrbinary("RETR " + file_path, out_file.write, 8 * 1024)
+        self.downloader.queue.append((file_path, output_dir))
         
     def upload_file(self, file_path: str, directory: str = ""):
+        self.uploader.queue.append(file_path)
+
+
+class FTPBaseTransferThread(Thread):
+    def __init__(self, parent: FTPClient):
+        super().__init__()
+        self.ftp = parent
+        self.queue = []
+        self.progress = 0.0
+        self.file_size = 0
+        self.cur_file_path = ""
+        self.callback = staticmethod
+        
+    def process_file(self, file_path: str):
+        pass
+    
+    def run_progress_callback(self, file_path: str, file_progress: float):
+        if self.callback:
+            self.callback(file_path)
+        
+    def run(self):
+        while True:
+            if self.queue:
+                self.progress = 0.0
+                self.process_file(self.queue[0])
+                self.queue.remove(self.queue[0])
+            sleep(0.1)
+            
+            
+# TODO: DO THIS CORRECTLY, this is only because this is due tomorrow for senior project,
+#  except this will clearly be here for a long time
+AWFUL_DL_PATH = "C:/" if os.name == "nt" else "/"
+
+
+class FTPDownloader(FTPBaseTransferThread):
+    def __init__(self, parent: FTPClient):
+        super().__init__(parent)
+        self.out_file = ""
+        self.output_file = ""
+        self.out_file_io = None
+        
+    def file_write(self, data: bytes):
+        self.out_file_io.write(data)
+        self.progress = os.path.getsize(self.cur_file_path) / int(self.file_size)
+        self.run_progress_callback(self.cur_file_path, self.progress)
+        
+    def process_file(self, file_tuple: tuple):
+        # PLACEHOLDER, GET FROM UserInfo IN Client CLASS BELOW
+        self.cur_file_path, self.output_file = file_tuple[0], file_tuple[1]
+        self.file_size = self.ftp.file_list[self.cur_file_path]["size"]
+        with open(self.output_file, "wb") as self.out_file_io:
+            self.ftp.retrbinary("RETR " + file_path, self.file_write)
+
+
+class FTPUploader(FTPBaseTransferThread):
+    def __init__(self, parent: FTPClient):
+        super().__init__(parent)
+        self.blocks_written = 0
+        
+    def file_read(self, block):
+        self.blocks_written += 1024
+        self.progress = self.blocks_written / int(self.file_size)
+        self.run_progress_callback(self.cur_file_path, self.progress)
+        
+    def process_file(self, file_path: str):
+        self.file_size = self.ftp.file_list[file_path]["size"]
+        self.cur_file_path = file_path
         if file_path and os.path.isfile(file_path):
             with open(file_path, "rb") as file_read:
-                self.storbinary(f"STOR {os.path.basename(file_path).replace(' ', '_')}", file_read)
+                self.ftp.storbinary(f"STOR {os.path.basename(file_path)}", file_read, 1024, self.file_read)
 
 
 class Client(Thread):
@@ -387,6 +460,9 @@ class Client(Thread):
         
         self.name = self.user_config.GetUsername()
         self.profile_pic_path = self.user_config.GetProfilePicturePath()
+        global AWFUL_DL_PATH
+        AWFUL_DL_PATH = self.user_config.user.download
+        
         self._event_callbacks = {}
         self._connected_callback = None
         self._is_started = False  # would be _started, but that's used by threading
