@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import base64
 import platform
@@ -333,7 +334,7 @@ def IsWindows10() -> bool:
 
 
 def TimePrint(*args) -> None:
-    print(f"[{GetDateAndTime()}] {str(*args)}")
+    sys.stdout.write(f"[{GetDateAndTime()}] {str(*args)}\n")
     
     
 def StackTraceNoStandardLib(f: Exception) -> list:
@@ -436,9 +437,10 @@ def PrintColor(color: Color, *text):
     
 def TimePrintColor(color: Color, *text):
     if _win32_legacy_con:
+        sys.stdout.write(f"[{GetDateAndTime()}] ")
         win32_set_fore_color(int(color.value))
-        TimePrint(*text)
+        sys.stdout.write(f"{''.join(text)}\n")
         win32_set_fore_color(int(Color.DEFAULT.value))
     else:
-        TimePrint(f"{color.value}[{GetDateAndTime()}] {''.join(text)}{Color.DEFAULT.value}")
+        sys.stdout.write(f"[{GetDateAndTime()}] {color.value}{''.join(text)}{Color.DEFAULT.value}\n")
 
