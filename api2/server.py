@@ -196,8 +196,7 @@ class Channel:
 CREATE TABLE messages (
     time FLOAT,
     user CHAR(36) NOT NULL,
-    text TEXT(4096),
-    file TEXT(1024)
+    text TEXT(4096)
 );""")
         except sqlite3.OperationalError as F:
             print(str(F))
@@ -238,10 +237,8 @@ CREATE TABLE messages (
         file, cursor = self.OpenFile()
         # time_received = str(datetime.datetime.fromtimestamp(message["time_received"]))
         cursor.execute(
-            """INSERT INTO messages (time, user, text, file) VALUES (?, ?, ?, ?);""",
-            # """INSERT INTO messages VALUES (?, ?, ?, ?);""",
-            (message.recv, message.content["name"],
-             message.content["text"], message.content["file"]))
+            """INSERT INTO messages (time, user, text) VALUES (?, ?, ?);""",
+            (message.recv, message.content["name"], message.content["text"]))
         self.SaveAndClose(file)
     
     def GetAllMessagesTest(self) -> list:

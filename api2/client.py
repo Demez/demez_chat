@@ -314,6 +314,8 @@ class FTPClient(ftplib.FTP):
         self.parent = parent
         self.ip = ip
         self.port = port
+        # TODO: add ipv6 check here
+        self.address = f"{self.ip}:{self.port}"
         
         self.file_list = {}
         
@@ -337,6 +339,21 @@ class FTPClient(ftplib.FTP):
         self.uploader.start()
         self.downloader.start()
         
+    def add_address(self, url: str) -> str:
+        url = url.replace(self.get_var_url(), self.get_base_url())
+        return url
+        
+    def get_base_url(self) -> str:
+        return f"ftp://{self.address}/"
+        
+    @staticmethod
+    def get_var_url() -> str:
+        return f"ftp://server/"
+
+    @staticmethod
+    def get_attachments_folder() -> str:
+        return ""  # f"attachments/"
+        
     def isfile(self, path: str) -> bool:
         return self.exists(path) and self.file_list[path]["type"] == "file"
         
@@ -353,10 +370,10 @@ class FTPClient(ftplib.FTP):
         return self.file_list[path]
     
     def list_dir(self, path: str = "") -> dict:
-        if not self.file_list:
-            file_list_gen = self.mlsd()
-            for file_tuple in file_list_gen:
-                self.file_list[file_tuple[0]] = file_tuple[1]
+        self.file_list = {}
+        file_list_gen = self.mlsd()
+        for file_tuple in file_list_gen:
+            self.file_list[file_tuple[0]] = file_tuple[1]
         return self.file_list
         
     def cwd(self, dirname: str):
@@ -380,7 +397,7 @@ class FTPClient(ftplib.FTP):
         self.downloader.queue.append((file_path, output_dir))
         
     def upload_file(self, file_path: str, directory: str = ""):
-        self.uploader.queue.append(file_path)
+        self.uploader.queue.append((file_path, directory))
 
 
 class FTPBaseTransferThread(Thread):
@@ -393,25 +410,20 @@ class FTPBaseTransferThread(Thread):
         self.cur_file_path = ""
         self.callback = staticmethod
         
-    def process_file(self, file_path: str):
+    def process_file(self, file_path: str, directory: str):
         pass
     
     def run_progress_callback(self, file_path: str, file_progress: float):
         if self.callback:
-            self.callback(file_path)
+            self.callback(file_path, file_progress)
         
     def run(self):
         while True:
             if self.queue:
                 self.progress = 0.0
-                self.process_file(self.queue[0])
+                self.process_file(*self.queue[0])
                 self.queue.remove(self.queue[0])
             sleep(0.1)
-            
-            
-# TODO: DO THIS CORRECTLY, this is only because this is due tomorrow for senior project,
-#  except this will clearly be here for a long time
-AWFUL_DL_PATH = "C:/" if os.name == "nt" else "/"
 
 
 class FTPDownloader(FTPBaseTransferThread):
@@ -423,15 +435,23 @@ class FTPDownloader(FTPBaseTransferThread):
         
     def file_write(self, data: bytes):
         self.out_file_io.write(data)
-        self.progress = os.path.getsize(self.cur_file_path) / int(self.file_size)
+        self.progress = os.path.getsize(self.output_file) / int(self.file_size)
         self.run_progress_callback(self.cur_file_path, self.progress)
         
-    def process_file(self, file_tuple: tuple):
+    def process_file(self, file_path: str, directory: str):
         # PLACEHOLDER, GET FROM UserInfo IN Client CLASS BELOW
-        self.cur_file_path, self.output_file = file_tuple[0], file_tuple[1]
-        self.file_size = self.ftp.file_list[self.cur_file_path]["size"]
-        with open(self.output_file, "wb") as self.out_file_io:
-            self.ftp.retrbinary("RETR " + file_path, self.file_write)
+        self.cur_file_path, self.output_file = file_path, directory
+        if self.cur_file_path in self.ftp.file_list:
+            self.file_size = self.ftp.file_list[self.cur_file_path]["size"]
+        else:
+            PrintWarning("File does not exist on FTP Server: ", file_path)
+            return
+        try:
+            with open(self.output_file, "wb") as self.out_file_io:
+                self.ftp.retrbinary("RETR " + file_path, self.file_write)
+            self.run_progress_callback(self.cur_file_path, 1.0)
+        except PermissionError:
+            PrintError(f"FTP Download Failed: PermissionError, file may already exist:\n\"{self.output_file}\"")
 
 
 class FTPUploader(FTPBaseTransferThread):
@@ -444,12 +464,17 @@ class FTPUploader(FTPBaseTransferThread):
         self.progress = self.blocks_written / int(self.file_size)
         self.run_progress_callback(self.cur_file_path, self.progress)
         
-    def process_file(self, file_path: str):
-        self.file_size = self.ftp.file_list[file_path]["size"]
+    def process_file(self, file_path: str, directory: str):
+        self.blocks_written = 0
+        self.file_size = os.path.getsize(file_path)
         self.cur_file_path = file_path
         if file_path and os.path.isfile(file_path):
+            if not directory.endswith("/"):
+                directory += "/"
             with open(file_path, "rb") as file_read:
                 self.ftp.storbinary(f"STOR {os.path.basename(file_path)}", file_read, 1024, self.file_read)
+            self.ftp.list_dir()
+            self.run_progress_callback(self.cur_file_path, 1.0)
 
 
 class Client(Thread):
@@ -460,8 +485,7 @@ class Client(Thread):
         
         self.name = self.user_config.GetUsername()
         self.profile_pic_path = self.user_config.GetProfilePicturePath()
-        global AWFUL_DL_PATH
-        AWFUL_DL_PATH = self.user_config.user.download
+        self.dl_path = self.user_config.user.download
         
         self._event_callbacks = {}
         self._connected_callback = None

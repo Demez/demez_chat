@@ -1,4 +1,5 @@
 import os
+import uuid
 import urllib.request
 import urllib.error
 from http.client import HTTPResponse
@@ -7,14 +8,19 @@ from enum import Enum, auto
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
+import ftplib
+from time import sleep
+
+from api2.shared import PrintError, PrintException
 from api2.video_player import VideoPlayer
+from threading import Thread
 
 
-class EmbedTypes(Enum):
-    IMAGE = auto(),
-    VIDEO = auto(),
-    AUDIO = auto(),
-    URL = auto(),
+class EmbedType(Enum):
+    IMAGE = auto()
+    VIDEO = auto()
+    AUDIO = auto()
+    URL = auto()
     NONE = auto()  # if there is no embed for the url
 
 
@@ -26,13 +32,18 @@ AUDIO_EXTS = {".opus", ".ogg", ".wav", ".flac", ".mp3", ".aac", ".ac3"}
 def GetEmbedTypeExt(path: str) -> Enum:
     path_ext = os.path.splitext(path)[1]
     if path_ext in IMAGE_EXTS:
-        return EmbedTypes.IMAGE
+        return EmbedType.IMAGE
     elif path_ext in VIDEO_EXTS:
-        return EmbedTypes.VIDEO
+        return EmbedType.VIDEO
     elif path_ext in AUDIO_EXTS:
-        return EmbedTypes.AUDIO
+        return EmbedType.AUDIO
+    
+    # hack to allow the video player to use youtube stuff right now
+    elif "youtube.com/watch?v=" in path or "youtu.be/" in path:
+        return EmbedType.VIDEO
+    
     else:
-        return EmbedTypes.URL
+        return EmbedType.URL
 
 
 # TODO: finish this
@@ -40,8 +51,8 @@ def GetEmbedTypeExt(path: str) -> Enum:
 def GetEmbedTypeBytes(opened_url) -> Enum:
     first_bytes = opened_url.read(24)
     if CheckImage(first_bytes):
-        return EmbedTypes.IMAGE
-    return EmbedTypes.NONE
+        return EmbedType.IMAGE
+    return EmbedType.NONE
 
 
 def CheckImage(_bytes: bytes) -> bool:
@@ -53,21 +64,83 @@ def CheckImage(_bytes: bytes) -> bool:
 
 # TODO: make url downloading and stuff separate from the main thread (new thread)
 #  and then have a callback on the main thread when if downloads successfully
-def DownloadURL(url: str, bad_callback: classmethod):
+def OpenURL(url: str, bad_callback: classmethod):
     user_agent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'
     headers = {'User-Agent': user_agent, }
 
-    request = urllib.request.Request(url, None, headers)  # The assembled request
+    request = urllib.request.Request(url, None, headers)
     try:
         response = urllib.request.urlopen(request)
-    except urllib.error.URLError:
-        return None
+    except urllib.error.URLError as F:
+        PrintException(F, "Error Opening URL: ", url)
+        return
     except CertificateError:
-        return None
-    # data = response.read()  # The data u need
-    # return response
-    if bad_callback:
+        return
+    
+    try:
         bad_callback(url, response)
+    except TypeError as F:
+        PrintException(F, "TypeError Calling Callback for Downloading URL: ", url)
+    except Exception as F:
+        PrintException(F, "Error Calling Callback for Downloading URL: ", url)
+        
+        
+class DataStorage:
+    def __init__(self):
+        self.data = b""
+        
+    def AddData(self, *args):
+        self.data += added_data
+        
+        
+class FTPDownloadThread(Thread):
+    def __init__(self):
+        super().__init__()
+        self.queue = []
+        self.ftp = {}
+        
+    def run(self):
+        while True:
+            if self.queue:
+                ftp_address, url, bad_callback = self.queue[0]
+                
+                if not url.startswith("ftp://server/"):
+                    self.queue.remove(self.queue[0])
+                    sleep(0.1)
+                    continue
+                
+                address = f"ftp://{self.ftp[ftp_address].host}:{self.ftp[ftp_address].port}/"
+                
+                url = url.replace("ftp://server/", address)
+                    
+                base_path = url.split(address)[1]
+                if self.ftp[ftp_address].isfile(base_path):
+                    dl_name = f"tmp_download/{base_path}"  # i don't care right now
+                    if not os.path.isfile(dl_name):
+                        with open(dl_name, "wb") as dl_file:
+                            self.ftp[ftp_address].retrbinary(f"RETR {base_path}", dl_file.write, 1024)
+                        # self.ftp.retrbinary(f"RETR {base_path}", data.AddData, 1024)
+            
+                    data = b""
+                    with open(dl_name, "rb") as dl_file:
+                        data += dl_file.read()
+                    
+                    try:
+                        bad_callback(url, data)
+                    except TypeError as F:
+                        PrintException(F, "TypeError Calling Callback for Downloading URL: ", url)
+                    except Exception as F:
+                        PrintException(F, "Error Calling Callback for Downloading URL: ", url)
+                        
+                self.queue.remove(self.queue[0])
+            sleep(0.1)
+            
+            
+FTP_THREAD = FTPDownloadThread()
+        
+        
+def FTPOpenURL(ftp: ftplib.FTP, url: str, bad_callback: classmethod):
+    FTP_THREAD.queue.append((ftp.address, url, bad_callback))
     
     
 class BaseEmbed(QLabel):
@@ -80,16 +153,54 @@ class VideoEmbed(BaseEmbed):
     def __init__(self, parent: QWidget, path: str):
         super().__init__(parent, path)
         self.UpdateImageSize(600, 800)
+        
+        
+class BaseImageView(QGraphicsView):
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.parent = parent
+        self._empty = True
+        self._scene = QGraphicsScene(self)
+        self._photo = QGraphicsPixmapItem()
+        self._scene.addItem(self._photo)
+        self.setScene(self._scene)
+        
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setBackgroundBrush(QBrush(QColor(25, 25, 25)))
+        self.setFrameShape(QFrame.NoFrame)
+        self.setFocusPolicy(Qt.NoFocus)
+    
+    def RemovePhoto(self) -> None:
+        self._empty = True
+        self.setDragMode(QGraphicsView.NoDrag)
+        self._photo.setPixmap(QPixmap())
 
+    def HasPhoto(self) -> bool:
+        return not self._empty
+    
+    def SetImageFromData(self, data: bytes) -> bool:
+        pix_map = QPixmap()
+        pix_map.loadFromData(data)
+        
+        if pix_map and not pix_map.isNull():
+            self._empty = False
+            self._photo.setPixmap(pix_map)
+            self.fitInView(False)
+            return True
+        else:
+            self.RemovePhoto()
+            return False
+        
 
 class ImageEmbed(BaseEmbed):
-    def __init__(self, parent: QWidget, path: str, response: HTTPResponse):
+    def __init__(self, parent: QWidget, path: str, data: bytes):
         super().__init__(parent, path)
-        response = response  # useless
-        data = response.read()
         self.image_pixmap = QPixmap()
         self.image_pixmap.loadFromData(data)
-        self.UpdateImageSize(600, 800)
+        self.UpdateImageSize(800, 600)
 
     # bad code probably
     def UpdateImageSize(self, max_width: int, max_height: int) -> None:
@@ -112,3 +223,81 @@ class ImageEmbed(BaseEmbed):
 
     def UpdateImagePreview(self):
         pass
+
+
+class ImageEmbedWIP(BaseImageView):
+    photoClicked = pyqtSignal(QPoint)
+    
+    def __init__(self, parent: QWidget, path: str, data: bytes):
+        super().__init__(parent)
+        self._zoom = 0
+        # self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        # self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # self.setBackgroundBrush(QBrush(QColor(25, 25, 25)))
+        # self.setFrameShape(QFrame.NoFrame)
+        self.setFocusPolicy(Qt.NoFocus)
+        
+        if not self.SetImageFromData(data):
+            print("Image doesn't exist: " + path)
+    
+    # TODO: this doesn't actually do anything right now when set to False, oof
+    #  should reset the zoom
+    def fitInView(self, scale=False, scale_down=False):
+        rect = QRectF(self._photo.pixmap().rect())
+        if not rect.isNull():
+            self.setMaximumWidth(rect.width())
+            self.setMaximumHeight(rect.height())
+            self.setSceneRect(rect)
+            if self.HasPhoto():
+                unity = self.transform().mapRect(QRectF(0, 0, 1, 1))
+                self.scale(1 / unity.width(), 1 / unity.height())
+                viewrect = self.viewport().rect()
+                scenerect = self.transform().mapRect(rect)
+                
+                if scale:
+                    factor = min(viewrect.width() / scenerect.width(),
+                                 viewrect.height() / scenerect.height())
+                    self.scale(factor, factor)
+                
+                elif scale_down:
+                    w_factor = 1.0
+                    h_factor = 1.0
+                    
+                    if scenerect.width() > viewrect.width():
+                        w_factor = viewrect.width() / scenerect.width()
+                    
+                    if scenerect.height() > viewrect.height():
+                        h_factor = viewrect.height() / scenerect.height()
+                    
+                    factor = min(w_factor, h_factor)
+                    self.scale(factor, factor)
+            self._zoom = 0
+    
+    # might have a overlay preview window similar to discord
+    # or an entirely separate window for an image viewer
+    def wheelEvent(self, event):
+        if False:  # self.HasPhoto():
+            if event.angleDelta().y() > 0:
+                factor = 1.25
+                self._zoom += 1
+            else:
+                factor = 0.8
+                self._zoom -= 1
+            
+            self.scale(factor, factor)
+    
+    # Unused?
+    def toggleDragMode(self):
+        if self.dragMode() == QGraphicsView.ScrollHandDrag:
+            self.setDragMode(QGraphicsView.NoDrag)
+        elif not self._photo.pixmap().isNull():
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+    
+    def mousePressEvent(self, event):
+        if self._photo.isUnderMouse():
+            self.photoClicked.emit(QPoint(event.pos()))
+        super().mousePressEvent(event)
+
+

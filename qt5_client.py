@@ -1,16 +1,18 @@
 import sys
 import datetime
+import uuid
 
 from threading import Thread
 from urllib.parse import urlparse
+from urllib.response import addinfourl
 from qt5_bookmark_manager import BookmarkManager
 from qt5_client_embed import *
 from api2.client import Client, ServerCache
-from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime, Packet, PrintWarning
+from api2.shared import TimePrint, GetTime24Hour, UnixToDateTime, Packet, PrintWarning, PrintError
 from api2.video_player import VideoPlayer
 
-import cProfile, pstats, io
-from pstats import SortKey
+import ftplib
+
 from time import sleep, perf_counter
 
 # for pycharm, install pyqt5-stubs, so you don't get 10000 errors for no reason
@@ -29,6 +31,12 @@ from time import perf_counter, sleep
 
 
 DEFAULT_PFP_PATH = "doge.png"
+UPLOADING_FILES = set()
+
+
+# JUST DIE
+if not os.path.isdir("tmp_upload"):
+    os.mkdir("tmp_upload")
 
 
 def ThreadPrint(thread, *args):
@@ -37,11 +45,13 @@ def ThreadPrint(thread, *args):
 
 def RemoveWidgets(layout: QLayout) -> None:
     try:
-        [layout.itemAt(i).widget().setParent(None) for i in reversed(range(layout.count()))]
-    except AttributeError:
-        return
+        for i in reversed(range(layout.count())):
+            try:
+                layout.itemAt(i).widget().setParent(None)
+            except AttributeError:
+                continue
     except Exception as F:
-        print(F)
+        PrintException(F, "Error Removing Widgets")
 
 
 def IsValidURL(url: str) -> bool:
@@ -50,26 +60,41 @@ def IsValidURL(url: str) -> bool:
         return all([result.scheme, result.netloc])
     except ValueError:
         return False
-
-
-class Help(QTimer):
-    def __init__(self):
-        super().__init__()
-        self.prof = cProfile.Profile()
-        self.prof.enable()
-        self.exiting = False
-        self.timeout.connect(self.help)
-        self.last_update = 0
-        
-    def help(self):
-        if self.last_update != 0:
-            diff = round(perf_counter() - self.last_update, 6)
-            # print(f"TIME: {diff}")
-            if diff > 5.0:
-                print("bruh")
-                print(self.prof.print_stats())
     
-        self.last_update = perf_counter()
+    
+def CheckForURLs(text: str) -> dict:
+    url_dict = {}
+    text_split_lines = text.splitlines()
+    for text_line in text_split_lines:
+        text_split = text_line.split(" ")
+        start = 0
+        end = 1
+        current_url = ""
+        while end < len(text_split) + 1:
+            string = " ".join(text_split[start:end])
+            if IsValidURL(string):
+                current_url = string
+                end += 1
+            elif current_url:
+                url_dict[string] = GetEmbedTypeExt(string)
+                start = end
+                end += 1
+            else:
+                start += 1
+                end += 1
+        if current_url:
+            url_dict[current_url] = GetEmbedTypeExt(current_url)
+    return url_dict
+    
+    
+def RemoveVideoPlayer(embed: VideoPlayer):
+    if type(embed) == VideoPlayer:
+        embed.player.quit()
+        if embed.player.handle:
+            embed.player.terminate()
+        del embed.player
+        embed.position_thread.stop()
+    del embed
     
     
 class TextBox(QTextEdit):
@@ -80,8 +105,17 @@ class TextBox(QTextEdit):
         self.setReadOnly(True)
         # self.text_input.setMaximumHeight(200)
         
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:
+        return source.hasImage() or source.hasText() or super().canInsertFromMimeData(source)
+        
     def insertFromMimeData(self, source: QMimeData):
-        self.insertPlainText(source.text())
+        if source.hasText():
+            self.insertPlainText(source.text())
+        elif source.hasImage():
+            # JUST DIE
+            rng_name = "tmp_upload/unknown_" + str(uuid.uuid4()) + ".png"  # i don't care right now
+            ass = source.imageData().save(rng_name)
+            self.insertPlainText("file:///" + os.getcwd().replace("\\", "/") + "/" + rng_name)
     
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
@@ -119,20 +153,60 @@ class ChatBox(QWidget):
     
     def Disable(self):
         self.text_input.setReadOnly(True)
+        
+    @staticmethod
+    def GetFilesForUpload(text: str) -> list:
+        file_list = []
+        text_split_lines = text.splitlines()
+        for text_line in text_split_lines:
+            if "file:///" in text_line:
+                text_split = text_line.split(" ")
+                start = 0
+                end = 1
+                while end < len(text_split) + 1:
+                    file_path = " ".join(text_split[start:end])
+                    # file:/// = 8 chars
+                    bruh = os.path.isfile(os.path.normpath(file_path[8:]))
+                    if file_path not in file_list and os.path.isfile(os.path.normpath(file_path[8:])):
+                        file_list.append(file_path)
+                        start = end
+                    end += 1
+        return file_list
+        
+    def AutoUploadFromMessageText(self, text: str) -> str:
+        ftp = GET_SERVER_CACHE().ftp
+        if "file:///" in text:
+            ftp_url = ftp.get_var_url() + ftp.get_attachments_folder()
+        
+            file_list = self.GetFilesForUpload(text)
+            
+            for file_url in file_list:
+                file_name = os.path.basename(file_url)
+                ftp_path = ftp_url + file_name
+                text = text.replace(file_url, ftp_path)
+                file = file_url[8:]
+                main_window.ftp_explorer.ui_file_transfer.add_item(file, os.path.getsize(file), os.path.basename(file))
+                ftp.upload_file(file, ftp.get_attachments_folder())
+                UPLOADING_FILES.add(ftp_path)
+        
+        return text
 
     @pyqtSlot()
     def SendMessage(self):
-        if self.text_input.toPlainText():
-            server_cache = main_window.server_list.GetSelectedServerCache()
-            message_dict = server_cache.SendMessage(main_window.chat_view.current_channel, self.text_input.toPlainText())
+        text = self.text_input.toPlainText()
+        if text:
+            server = main_window.server_list.GetSelectedServerCache()
+            text = self.AutoUploadFromMessageText(text)
+            message_dict = server.SendMessage(main_window.chat_view.current_channel, text)
             main_window.chat_view.SendMessage(message_dict)
             self.text_input.setText("")
 
 
 class MessageView(QWidget):
     sig_embed = pyqtSignal(str, HTTPResponse)
+    sig_embed_ftp = pyqtSignal(str, bytes)
 
-    def __init__(self, msg_id: int, unix_time, sender: str, text: str, file: str = "", client_is_sender: bool = False):
+    def __init__(self, msg_id: int, unix_time, sender: str, text: str, client_is_sender: bool = False):
         super().__init__()
         self.msg_id = msg_id
         self.setLayout(QHBoxLayout())
@@ -141,6 +215,8 @@ class MessageView(QWidget):
         self.content_layout = QVBoxLayout()
         self.header_layout = QHBoxLayout()
         self.message_layout = QVBoxLayout()
+        
+        self.setLayout(self.message_layout)
 
         # image_label = QLabel(self)
         # image_label.setPixmap(QPixmap(DEFAULT_PFP_PATH))
@@ -166,13 +242,16 @@ class MessageView(QWidget):
         self.text = QLabel(text)
         if client_is_sender:
             # TODO: need something for different themes, like disabled text color or something
+            # palette = self.palette()
+            # palette.setColor(self.backgroundRole(), Qt.red)
+            # self.setPalette(palette)
             self.text.setStyleSheet("color: #737373;")
         
         self.name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.time.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
         self.text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # self.text.setWordWrap(True)  # why does this not work correctly
+        self.text.setWordWrap(True)
 
         self.user_image_layout.addWidget(self.user_image)
         self.user_image_layout.addStretch(1)
@@ -198,67 +277,98 @@ class MessageView(QWidget):
 
         self.message_layout.addWidget(self.text)
         self.message_layout.addStretch(1)
+        # self.text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
-        self.layout().addStretch(0)
         self.layout().setContentsMargins(QMargins(0, 0, 0, 0))
         self.layout().setSpacing(6)
+        self.setMaximumWidth(900)
         self.setContentsMargins(QMargins(0, 0, 0, 0))
 
-        self.sig_embed.connect(self.EmbedDownloadCallback)
+        self.sig_embed.connect(self.EmbedDownloadCallbackHTTP)
+        self.sig_embed_ftp.connect(self.EmbedAddImage)
 
+        self.embed_urls = set()
         self.embed_list = []
-        self.url_dict = self.CheckForURL()
+        self.url_dict = CheckForURLs(self.text.text())
         
         # TODO: limit the max download thread count
+        self.text.setOpenExternalLinks(True)
         if self.url_dict:
-            self.text.setOpenExternalLinks(True)
+            ftp = GET_SERVER_CACHE().ftp
             for url in self.url_dict:
-                text = self.text.text()
-                text = text.replace(url, f"<a href=\"{url}\">{url}</a>")
-                self.text.setText(text)
-                if self.url_dict[url] == EmbedTypes.IMAGE:
-                    bad_download_thread = Thread(target=DownloadURL, args=(url, self.sig_embed.emit))
-                    bad_download_thread.start()
-                    
-                elif self.url_dict[url] == EmbedTypes.VIDEO:
-                    video_embed = VideoPlayer(self)
-                    video_embed.set_video_path(url)
-                    self.embed_list.append(video_embed)
-                    self.message_layout.addWidget(video_embed)
+                if url.startswith("ftp://server/"):
+                    ftp_url = ftp.add_address(url)
+                    self.EmbedReplaceURL(url, ftp_url)
+                    if url not in UPLOADING_FILES:
+                        self.EmbedAdd(url)
+                else:
+                    self.EmbedReplaceURL(url, url)
+                    self.EmbedAdd(url)
 
     def FinishedSending(self, new_time=None):
         self.time.setText(UnixToDateTime(new_time).strftime("%Y-%m-%d - %H:%M:%S"))
         self.text.setStyleSheet("")
+        
+    def EmbedReplaceURL(self, url: str, link_url: str):
+        text = self.text.text()
+        text = text.replace(url, f"<a href=\"{link_url}\">{url}</a>").replace("\n", "<br>")
+        self.text.setText(text)
+        
+    def EmbedAdd(self, url: str):
+        # awful
+        if url in self.embed_urls:
+            return
 
-    def CheckForURL(self) -> dict:
-        url_dict = {}
-        text_split_lines = self.text.text().splitlines()
-        for text_line in text_split_lines:
-            text_split = text_line.split(" ")
-            for string in text_split:
-                if IsValidURL(string):
-                    url_dict[string] = GetEmbedTypeExt(string)
-        return url_dict
+        self.embed_urls.add(url)
+        embed_type = GetEmbedTypeExt(url)
+        if embed_type in {EmbedType.IMAGE, EmbedType.VIDEO, EmbedType.AUDIO}:
+            
+            # TODO: check if this is one of our ~~holograms~~ ftp servers saved
+            if url.startswith("ftp://"):
+                # HACKY
+                embed_type = GetEmbedTypeExt(url)
+                
+                if embed_type == EmbedType.IMAGE:
+                    bad_download_thread = Thread(target=FTPOpenURL, args=(GET_SERVER_CACHE().ftp, url, self.sig_embed_ftp.emit))
+                    bad_download_thread.start()
+                    
+                elif embed_type in {EmbedType.VIDEO, EmbedType.AUDIO}:
+                    self.EmbedAddVideo(url)
+            else:
+                bad_download_thread = Thread(target=OpenURL, args=(url, self.sig_embed.emit))
+                bad_download_thread.start()
+            
+    def EmbedAddVideo(self, url: str):
+        video_embed = VideoPlayer(self)
+        # video_embed.set_video_path(url)
+        video_embed.load_video(url)
+        # video_embed.show()
+        self.embed_list.append(video_embed)
+        self.message_layout.addWidget(video_embed)
+            
+    def EmbedAddImage(self, url, data: bytes):
+        image_embed = ImageEmbed(main_window.chat_view, url, data)
+        self.embed_list.append(image_embed)
+        self.message_layout.addWidget(image_embed)
 
-    # TODO: look at QMovie for embeds here, or use libmpv, good luck with that in python though lol
-    def EmbedDownloadCallback(self, url: str, opened_url: HTTPResponse) -> None:
+    def EmbedDownloadCallbackFTP(self, url: str, opened_url: bytes) -> None:
+        self.EmbedDownloadCallback(url, opened_url)
+
+    def EmbedDownloadCallbackHTTP(self, url: str, opened_url: HTTPResponse) -> None:
+        self.EmbedDownloadCallback(url, opened_url)
+
+    def EmbedDownloadCallback(self, url: str, opened_url) -> None:
         # will use when finished
         # embed_type = GetEmbedTypeBytes(opened_url)
         embed_type = GetEmbedTypeExt(url)
-        if embed_type == EmbedTypes.IMAGE:
-            image_embed = ImageEmbed(main_window.chat_view, url, opened_url)
-            self.embed_list.append(image_embed)
-            self.message_layout.addWidget(image_embed)
         
-        
-# TODO: when the scrollbar reaches the top, request more messages
-#  maybe some event section on the socket api to request
-#  maybe get the amount of event sections, and we set page numbers we are viewing
-#  could view all pages probably
-# also have this somehow remember where we were on each channel for scrolling
-#  also have this
-# TODO: maybe use QTableView, though i don't think i can just use normal widgets for that
-#  like i can't add a video player in QTableView probably
+        if embed_type == EmbedType.IMAGE:
+            self.EmbedAddImage(url, opened_url.read())
+        elif embed_type in {EmbedType.VIDEO, EmbedType.AUDIO}:
+            self.EmbedAddVideo(url)
+
+
 class ChatView(QScrollArea):
     sig_add_message = pyqtSignal(int, tuple)
     
@@ -272,7 +382,7 @@ class ChatView(QScrollArea):
         self.setWidget(self.message_contents_widget)
         
         self.setWidgetResizable(True)
-        self.setContentsMargins(QMargins(0, 0, 0, 0))
+        # self.setContentsMargins(QMargins(0, 0, 0, 0))
         self.message_contents_widget.setContentsMargins(QMargins(0, 0, 0, 0))
         
         self.current_channel = ""
@@ -291,10 +401,12 @@ class ChatView(QScrollArea):
         
         # self.message_contents_layout.setContentsMargins(QMargins(0, 0, 0, 0))
         # self.message_contents_layout.setSpacing(0)
+        self.message_contents_layout.addStretch(0)
         # self.message_contents_widget.setStyleSheet("border: 2px solid; border-color: #660000;")
 
     def GetLayout(self):
-        return self.widget().layout()
+        # return self.widget().layout()
+        return self.message_contents_layout
     
     def GetMainWindow(self):
         return self.parent().parent().parent()  # ew
@@ -316,20 +428,15 @@ class ChatView(QScrollArea):
     # so i just copy the 2 lines in it's deconstructor, and guess what? that solves the problem
     # so that means i just have to manually deconstruct it just to get it to function correctly lmao
     def RemoveEmbeds(self):
-        try:
-            for i in reversed(range(self.GetLayout().count())):
+        for i in reversed(range(self.GetLayout().count())):
+            try:
                 widget = self.GetLayout().itemAt(i).widget()
                 if type(widget) == MessageView:
                     for embed in widget.embed_list:
-                        if type(embed) == VideoPlayer:
-                            embed.player.quit()
-                            if embed.player.handle:
-                                embed.player.terminate()
-                            del embed.player
-                        del embed
+                        RemoveVideoPlayer(embed)
                 widget.setParent(None)
-        except AttributeError:
-            return
+            except AttributeError:
+                continue
         
     def Clear(self):
         self.messages.clear()
@@ -423,8 +530,7 @@ class ChatView(QScrollArea):
     def SendMessage(self, message_dict: dict) -> None:
         # msg_id: int, unix_time, sender: str, text: str, file: str = "", client_is_sender
         msg_id = 0 if not self.messages else max(map(int, self.messages.keys())) + 1
-        message_qt = MessageView(msg_id, message_dict["time"], message_dict["name"],
-                                 message_dict["text"], message_dict["file"], True)
+        message_qt = MessageView(msg_id, message_dict["time"], message_dict["name"], message_dict["text"], True)
         self.messages[msg_id] = message_qt
         self.sending_messages.append((message_dict, message_qt))
         self.message_contents_layout.addWidget(message_qt)
@@ -567,7 +673,14 @@ class ServerList(QListWidget):
     @pyqtSlot()
     def ServerSelected(self) -> None:
         server_cache = self.GetSelectedServerCache()
-        main_window.channel_list.SetChannels(server_cache.message_channels)
+        if self.IsServerSelected():
+            main_window.ftp_explorer_button.setEnabled(True)
+            main_window.ftp_explorer.ui_file_transfer.SwitchServer()
+            main_window.channel_list.SetChannels(server_cache.message_channels)
+        else:
+            main_window.ftp_explorer_button.setEnabled(False)
+            main_window.ftp_explorer.hide()
+            main_window.channel_list.clear()
 
     def GetSelectedServerName(self) -> str:
         return self.item(self.currentRow()).text()
@@ -612,16 +725,12 @@ class ChannelList(QListWidget):
         return room_id, room
     
     
-class FileListView(QTreeView):
+class BaseFileListView(QTreeView):
     def __init__(self, parent, file_list: QStandardItemModel):
         super().__init__(parent)
         self.setModel(file_list)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
 
         self.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.header().resizeSection(1, 120)
-        self.header().resizeSection(2, 80)
-        self.header().resizeSection(3, 80)
         
         self.header().setMinimumSectionSize(40)
         self.header().setStretchLastSection(False)
@@ -637,25 +746,7 @@ class FileListView(QTreeView):
         return file_list
     
     def EnterEvent(self):
-        selected_files = self.selectedIndexes()
-        if not selected_files:
-            return
-    
-        file_list = self.GetSelectedFiles()
-    
-        server = GET_SERVER_CACHE()
-        if len(file_list) == 1:
-            file_path = file_list[0]
-            
-            if server.ftp.isfile(file_path):
-                server.ftp.download_file(file_path, self.parent().dl_folder.text())
-            elif server.ftp.isdir(file_path):
-                server.ftp.cwd(file_path)
-                self.parent().SetDir("/" + file_path)
-        else:
-            for file_path in file_list:
-                if server.ftp.isfile(file_path):
-                    server.ftp.download_file(file_path, self.parent().dl_folder.text())
+        pass
     
     def keyPressEvent(self, event: QKeyEvent) -> None:
         super().keyPressEvent(event)
@@ -664,7 +755,66 @@ class FileListView(QTreeView):
         
     def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:
         super().mouseDoubleClickEvent(e)
-        self.EnterEvent()
+        if self.selectedIndexes():
+            self.EnterEvent()
+
+
+class FileListView(BaseFileListView):
+    def __init__(self, parent, file_list: QStandardItemModel):
+        super().__init__(parent, file_list)
+        self.parent = parent
+        self.setModel(file_list)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        
+        self.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.header().resizeSection(1, 120)
+        self.header().resizeSection(2, 80)
+        self.header().resizeSection(3, 80)
+        
+        self.header().setMinimumSectionSize(40)
+        self.header().setStretchLastSection(False)
+    
+    def EnterEvent(self):
+        file_list = self.GetSelectedFiles()
+        
+        ftp = GET_SERVER_CACHE().ftp
+        if len(file_list) == 1:
+            file_path = file_list[0]
+            
+            if ftp.isfile(file_path):
+                ftp.download_file(file_path, self.GetOutputFile(file_path))
+                self.parent.ui_file_transfer.add_item(
+                    file_path, ftp.file_list[file_path]["size"], self.GetOutputFile(file_path))
+                pass
+                
+            elif ftp.isdir(file_path):
+                ftp.cwd(file_path)
+                self.parent.SetDir("/" + file_path)
+        else:
+            for file_path in file_list:
+                if ftp.isfile(file_path):
+                    ftp.download_file(file_path, self.GetOutputFile(file_path))
+                    self.parent.ui_file_transfer.add_item(
+                        file_path, ftp.file_list[file_path]["size"], self.GetOutputFile(file_path))
+                    
+    def GetOutputFile(self, file_path: str) -> str:
+        return self.parent.dl_folder.text() + "/" + os.path.basename(file_path)
+
+
+class FileTransferView(BaseFileListView):
+    def __init__(self, parent, file_list: QStandardItemModel):
+        super().__init__(parent, file_list)
+        self.setModel(file_list)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        
+        self.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.header().resizeSection(1, 300)
+        self.header().resizeSection(2, 80)
+        self.header().resizeSection(3, 80)
+        self.header().resizeSection(4, 80)
+        
+        self.header().setMinimumSectionSize(40)
+        self.header().setStretchLastSection(False)
 
 
 class BaseFileList(QStandardItemModel):
@@ -676,6 +826,9 @@ class BaseFileList(QStandardItemModel):
         while index < len(names):
             self.setHorizontalHeaderItem(index, QStandardItem(names[index]))
             index += 1
+            
+    def SwitchServer(self):
+        pass
     
     def reset(self) -> None:
         self.removeRows(0, self.rowCount())
@@ -765,54 +918,83 @@ def get_date_modified_datetime(file_path: str) -> datetime.datetime:
     
 # based off of teamspeak 3's ftp gui
 class FTPFileExplorer(QWidget):
-    def __init__(self):
+    def __init__(self, parent):
         super().__init__()
+        self.main_window = parent
         self.setLayout(QVBoxLayout())
         self.setWindowTitle("FTP File Explorer")
+        self.resize(1000, 600)
         # self.file_manager = QListWidget()
         
         self.header = FileExplorerHeader(self)
         
         # download folder
-        # PLACEHOLDER: hardcoded
-        self.dl_folder = QLineEdit("C:/Users/Demez/Downloads")
+        self.dl_folder = QLineEdit(self.main_window.client.dl_path)
         
         self.ui_file_list = FileList()
         self.ui_file_list_view = FileListView(self, self.ui_file_list)
         
-        self.ui_file_transfer = FileTransferProgress(self)
+        self.ui_file_transfer = FileTransferList()
+        self.ui_file_transfer_view = FileTransferView(self, self.ui_file_transfer)
 
         self.layout().addWidget(self.header)
         self.layout().addWidget(self.ui_file_list_view)
         self.layout().addWidget(self.dl_folder)
-        self.layout().addWidget(self.ui_file_transfer)
+        self.layout().addWidget(self.ui_file_transfer_view)
         
         self._file_dialog = QFileDialog()
         self.current_server = None
         
     def show(self):
+        self.UpdateFileList()
         super().show()
         self.raise_()
-        self.UpdateFileList()
         
     def ClearFiles(self):
         self.ui_file_list.reset()
         
-    def DownloadFile(self, file_path):
+    def DownloadFile(self, file_path: str, output_dir: str = ""):
         server = GET_SERVER_CACHE()
-        server.ftp.download_file(file_path, self.dl_folder.text())
+        
+        if output_dir:
+            if file_path in server.ftp.file_list:
+                file_size = server.ftp.file_list[file_path]["size"]
+            else:
+                PrintWarning("File does not exist on FTP Server: ", file_path)
+                return
+            self.ui_file_transfer.add_item(file_path, file_size, output_dir)
+            server.ftp.download_file(file_path, output_dir)
+            
+        else:
+            server.ftp.download_file(file_path, self.dl_folder.text())
         
     def SetDir(self, directory: str):
         self.UpdateFileList()
         self.header.txt_path.setText(directory)
         
     def DeleteFile(self, path: str):
-        server = GET_SERVER_CACHE()
-        server.ftp.rmd(path)
-        pass
+        ftp = GET_SERVER_CACHE().ftp
+        if ftp.isfile(path):
+            try:
+                ftp.delete(path)
+                self.UpdateFileList()
+            except ftplib.error_perm:
+                PrintError(f"Cannot Delete File: \"{path}\"")
+        elif ftp.isdir(path):
+            try:
+                ftp.rmd(path)
+                self.UpdateFileList()
+            except ftplib.error_perm:
+                PrintError(f"Cannot Delete Folder: \"{path}\"")
         
     def DeleteSelected(self):
         [self.DeleteFile(file) for file in self.ui_file_list_view.GetSelectedFiles()]
+        
+    @staticmethod
+    def CreateDir(directory: str):
+        ftp = GET_SERVER_CACHE().ftp
+        if not ftp.isdir(directory):
+            ftp.mkd(directory)
         
     def ChangeDir(self, directory: str):
         server = GET_SERVER_CACHE()
@@ -838,7 +1020,6 @@ class FTPFileExplorer(QWidget):
         if filename:
             server_cache = GET_SERVER_CACHE()
             server_cache.ftp.upload_file(filename)
-            self.UpdateFileList()
     
     
 class FileExplorerHeader(QWidget):
@@ -848,31 +1029,34 @@ class FileExplorerHeader(QWidget):
         self.setLayout(QHBoxLayout())
         self.layout().setContentsMargins(0, 0, 0, 0)
         
-        # self.btn_new_dir = QPushButton("new dir")
         self.btn_del = QPushButton("del")
         self.btn_upload = QPushButton("upload")
         self.btn_up = QPushButton("up")
         self.btn_enter = QPushButton("enter")  # enter directory specified below
+        self.btn_new_dir = QPushButton("new dir")  # create directory below (lazy)
         self.txt_path = QLineEdit("/")  # current directory
         
+        self.btn_del.clicked.connect(self.parent.DeleteSelected)
         self.btn_upload.clicked.connect(self.parent.BrowseFileForUpload)
         self.btn_up.clicked.connect(self.BtnPressLeaveFolder)
         self.btn_enter.clicked.connect(self.BtnPressEnter)
+        self.btn_new_dir.clicked.connect(self.BtnPressNewDir)
 
         self.btn_del.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_upload.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_up.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_enter.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.btn_new_dir.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         
-        # self.layout().addWidget(self.btn_new_dir)
         self.layout().addWidget(self.btn_del)
         self.layout().addWidget(self.btn_upload)
         self.layout().addWidget(self.btn_up)
         self.layout().addWidget(self.txt_path)
         self.layout().addWidget(self.btn_enter)
+        self.layout().addWidget(self.btn_new_dir)
         
-    def BtnPressDelete(self):
-        self.parent.DeleteFile(self.txt_path.text())
+    def BtnPressNewDir(self):
+        self.parent.CreateDir(self.txt_path.text())
         
     def BtnPressLeaveFolder(self):
         folder = self.txt_path.text()
@@ -899,29 +1083,64 @@ class FileTransferProgress(QWidget):
             server.ftp.retrbinary("RETR " + file_path, out_file.write, 8 * 1024)
 
 
-class FileTransferList(BaseFileList):
+class ProgressBarItem(QStandardItem):
     def __init__(self):
-        super().__init__("Name", "Size", "Progress", "Progress Bar")
+        super().__init__()
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(100)
+        self.setData(self.progress_bar)
+        
+    def data(self, role=None, *args, **kwargs) -> QProgressBar:
+        return self.progress_bar
 
-    def _add_item_row(self, row: int, file_path: str, file_info: dict) -> None:
-        item_file_path = QStandardItem(file_path)
+
+class FileTransferList(BaseFileList):
+    sig_progress = pyqtSignal(str, float)
     
+    def __init__(self):
+        super().__init__("Name", "Output File", "Size", "Transfer", "Progress")
+        self.sig_progress.connect(self.update_progress)
+        
+    def SwitchServer(self):
         ftp = GET_SERVER_CACHE().ftp
-        if ftp.isdir(file_path):
-            item_type = QStandardItem("Folder")
-            size = ""
-        else:
-            item_type = QStandardItem(os.path.splitext(file_path)[1])
-            size = str(bytes_to_megabytes(file_info["size"])) + " MB"
+        ftp.uploader.callback = self.sig_progress.emit
+        ftp.downloader.callback = self.sig_progress.emit
+        
+    def update_progress(self, file_path: str, progress: float):
+        file_item = self.get_file_item(file_path)
+        item_progress = self.item(file_item.row(), 4)
+        # item_progress_bar = self.item(file_item.row(), 5)
+        
+        progress_str = f"{round(progress * 100, 2)}%"
+        item_progress.setText(progress_str)
+        # item_progress_bar.data().setValue(int(progress * 100))
+        
+        # awful, add the embed for it after it's finished being uploaded
+        if progress * 100 >= 100:
+            ftp = GET_SERVER_CACHE().ftp
+            ftp_url_end = ftp.get_attachments_folder() + os.path.basename(file_path)
+            ftp_url = ftp.get_base_url() + ftp_url_end
+            for message in main_window.chat_view.messages.values():
+                if type(message) == MessageView:
+                    if ftp_url in message.text.text():
+                        message.EmbedAdd(ftp.get_var_url() + ftp_url_end)
     
-        # 20200516165223
-        # 2020/05/16 - 16:52:23
-        date_mod = datetime.datetime.strptime(file_info["modify"], "%Y%m%d%H%M%S")
-        item_date_mod = QStandardItem(str(date_mod))
+    def add_item(self, file_path: str, file_size: int, output_file: str) -> None:
+        if not self.get_file_item(file_path):
+            self._add_item_row(self.rowCount(), file_path, file_size, output_file)
+
+    def _add_item_row(self, row: int, file_path: str, file_size: int, output_file: str) -> None:
+        item_file_path = QStandardItem(file_path)
+        item_output_file = QStandardItem(output_file)
     
+        size = str(bytes_to_megabytes(file_size)) + " MB"
         item_size = QStandardItem(size)
+        item_progress = QStandardItem("0.0%")
+        
+        # item_progress_bar = ProgressBarItem()
     
-        self._add_items_to_row(row, item_file_path, item_date_mod, item_type, item_size)
+        self._add_items_to_row(
+            row, item_file_path, item_output_file, item_size, QStandardItem(""), item_progress)
 
 
 class MainWindow(QWidget):
@@ -931,8 +1150,6 @@ class MainWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.prof = Help()
-        
         self.setLayout(QVBoxLayout())
         self.setWindowTitle("Demez Chat")
         self.client = Client()
@@ -949,8 +1166,9 @@ class MainWindow(QWidget):
         self.channel_list = ChannelList()
         
         self.ftp_explorer_button = QPushButton("FTP File Explorer")
-        self.ftp_explorer = FTPFileExplorer()
+        self.ftp_explorer = FTPFileExplorer(self)
         self.ftp_explorer_button.clicked.connect(self.ftp_explorer.show)
+        self.ftp_explorer_button.setEnabled(False)
         
         server_address_dict = {}
         for server in self.client.server_list:
@@ -986,16 +1204,16 @@ class MainWindow(QWidget):
         self.layout().addWidget(channel_layout_widget)
         
         channel_layout = QVBoxLayout()
+        channel_layout.addWidget(self.server_list)
         channel_layout.addWidget(self.channel_list)
         channel_layout.addWidget(self.ftp_explorer_button)
 
-        channel_chat_layout.addWidget(self.server_list)
         channel_chat_layout.addLayout(channel_layout)
         channel_chat_layout.addLayout(chat_layout)
         # channel_chat_layout.addWidget(chat_layout)
 
         self.setMinimumSize(QSize(100, 100))
-        self.resize(800, 600)
+        self.resize(1200, 720)
         self.layout().setContentsMargins(QMargins(0, 0, 0, 0))
 
         # self.sig_view_channel.connect(self.chat_view.MessageUpdate)
@@ -1032,7 +1250,7 @@ class MainWindow(QWidget):
         server_cache = self.server_list.GetSelectedServerCache()
         content = message.content
         channel = server_cache.message_channels[content["channel"]]
-        message_tuple = [content["time"], content["name"], content["text"], content["file"]]
+        message_tuple = [content["time"], content["name"], content["text"]]
         if content["name"] == server_cache.public_uuid:
             if not self.chat_view.CheckForSendingMessage(content):
                 self.chat_view.AddMessage(channel["count"], message_tuple)
@@ -1061,14 +1279,18 @@ def QtExceptionHook(exctype, value, traceback):
 sys.excepthook = QtExceptionHook
 
 
+def GET_SERVER_CACHE():
+    server = main_window.server_list.GetSelectedServerCache()
+    if server.ftp.address not in FTP_THREAD.ftp:
+        FTP_THREAD.ftp[server.ftp.address] = server.ftp
+    return server
+
+
 if __name__ == "__main__":
     APP = QApplication(sys.argv)
     APP.setDesktopSettingsAware(True)
     main_window = MainWindow()
-    main_window.prof.start()
-    
-    def GET_SERVER_CACHE():
-        return main_window.server_list.GetSelectedServerCache()
+    FTP_THREAD.start()
     
     try:
         sys.exit(APP.exec_())
