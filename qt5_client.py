@@ -939,8 +939,8 @@ class FTPFileExplorer(QWidget):
 
         self.layout().addWidget(self.header)
         self.layout().addWidget(self.ui_file_list_view)
-        self.layout().addWidget(self.dl_folder)
         self.layout().addWidget(self.ui_file_transfer_view)
+        self.layout().addWidget(self.dl_folder)
         
         self._file_dialog = QFileDialog()
         self.current_server = None
