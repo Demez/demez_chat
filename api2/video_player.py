@@ -254,7 +254,7 @@ class VideoPlayer(QWidget):
         
         self.position_slider.setValue(0)
         self.position_slider.setMaximum(0)
-        self.position_thread.start()
+        self.position_thread.start(1)
         
         # volume = self.get_volume()
         # self.volume_slider.setValue(volume)
